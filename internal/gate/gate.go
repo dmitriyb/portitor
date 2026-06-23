@@ -9,6 +9,7 @@ package gate
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -38,26 +39,31 @@ func isZero(s string) bool { return s == "" || strings.Trim(s, "0") == "" }
 // generic portitor enforce domain rules (e.g. "only reviewer/owner may close a
 // bead") from config, without built-in knowledge of beads/spex.
 type RoleRule struct {
-	Name         string   // stable identifier, surfaced as the violation rule
-	PathGlob     string   // git pathspec the commit's diff must touch
-	AddedRegex   string   // regex; matched against ADDED lines in that path's diff
-	AllowedRoles []string // the signer's role must be one of these
+	Name         string   `json:"name"`          // stable identifier, surfaced as the violation rule
+	PathGlob     string   `json:"path_glob"`     // git pathspec the commit's diff must touch
+	AddedRegex   string   `json:"added_regex"`   // regex; matched against ADDED lines in that path's diff
+	AllowedRoles []string `json:"allowed_roles"` // the signer's role must be one of these
 }
 
 // Config controls the checks.
 type Config struct {
 	// DefaultBranch is the protected branch (e.g. "main"). If empty, it is derived
 	// from the receiving repo's HEAD symref.
-	DefaultBranch string
+	DefaultBranch string `json:"default_branch"`
 	// AllowedSigners is the path to an OpenSSH allowed_signers file listing the
 	// commit signers portitor trusts. If empty, signatures cannot be trusted and
 	// every commit is treated as untrusted.
-	AllowedSigners string
+	AllowedSigners string `json:"allowed_signers"`
 	// Roles maps a signer key fingerprint (as git reports it via %GF, e.g.
 	// "SHA256:...") to a role name. Unmapped signers have the empty role.
-	Roles map[string]string
+	Roles map[string]string `json:"roles"`
 	// RoleRules are evaluated against every introduced commit.
-	RoleRules []RoleRule
+	RoleRules []RoleRule `json:"role_rules"`
+	// RequireUpToDateWithDefault, when true, rejects a feature-branch update whose
+	// tip does not contain the current default-branch tip (i.e. it is based on a
+	// stale default). The deterministic start-task wrapper branches from the current
+	// default, so this is a backstop. Off by default.
+	RequireUpToDateWithDefault bool `json:"require_up_to_date_with_default"`
 }
 
 // Violation is a single rejected condition. Rule is a stable identifier; Detail
@@ -105,7 +111,22 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 		}
 
 		if u.IsDelete() {
-			continue // nothing to sign- or role-check on a deletion
+			continue // nothing to sign-, ancestry-, or role-check on a deletion
+		}
+
+		// Rule: a feature branch must be based on the current default (not stale).
+		if cfg.RequireUpToDateWithDefault && u.Ref != defRef {
+			stale, err := staleBase(repoDir, defRef, u.NewSHA)
+			if err != nil {
+				return nil, fmt.Errorf("ancestry check for %s: %w", u.Ref, err)
+			}
+			if stale {
+				vs = append(vs, Violation{
+					Ref:    u.Ref,
+					Rule:   "stale-base",
+					Detail: fmt.Sprintf("branch is not based on the current %q — rebase onto it (git fetch && git rebase origin/%s)", def, def),
+				})
+			}
 		}
 
 		commits, err := newCommits(repoDir, u)
@@ -240,6 +261,41 @@ func git(repoDir string, args ...string) (string, error) {
 		return out.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
+}
+
+// staleBase reports whether newSHA fails to contain the current default-branch tip
+// (i.e. the branch is based on a stale default). If the default branch doesn't yet
+// exist in the repo, nothing is stale.
+func staleBase(repoDir, defRef, newSHA string) (bool, error) {
+	if !refExists(repoDir, defRef) {
+		return false, nil
+	}
+	tip, err := git(repoDir, "rev-parse", defRef)
+	if err != nil {
+		return false, err
+	}
+	anc, err := isAncestor(repoDir, strings.TrimSpace(tip), newSHA)
+	if err != nil {
+		return false, err
+	}
+	return !anc, nil
+}
+
+func refExists(repoDir, ref string) bool {
+	return exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", ref+"^{commit}").Run() == nil
+}
+
+// isAncestor reports whether ancestor is an ancestor of descendant.
+func isAncestor(repoDir, ancestor, descendant string) (bool, error) {
+	err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", ancestor, descendant).Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("merge-base --is-ancestor: %w", err)
 }
 
 func contains(ss []string, s string) bool {
