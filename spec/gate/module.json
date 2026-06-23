@@ -24,6 +24,21 @@
     },
     {
       "type": "functional",
+      "title": "Require feature branches to be based on the current default (opt-in)",
+      "description": "When Config.RequireUpToDateWithDefault is set, a non-default ref update whose new tip is not a descendant of the current default branch (git merge-base --is-ancestor <default> <new>) is a 'stale-base' violation, forcing a fresh rebase before landing. Disabled by default; the default branch itself is exempt."
+    },
+    {
+      "type": "functional",
+      "title": "Forward accepted feature branches to the real upstream",
+      "description": "post-receive (gate.Forward) pushes each accepted, non-default, non-deletion ref update to the configured upstream remote (Config.UpstreamRemote, default 'upstream') using credentials held only by the proxy. The default branch is never forwarded (PR/owner territory; pre-receive rejects pushes to it). Forwarding runs only after pre-receive has accepted the push."
+    },
+    {
+      "type": "functional",
+      "title": "Provision a gated bare repo",
+      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (so agents clone the default from the proxy with no upstream credential), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand."
+    },
+    {
+      "type": "functional",
       "title": "Reject the whole push atomically with all violations",
       "description": "pre-receive runs once per push over git's object quarantine. portitor collects every violation across all refs/commits and, if any exist, exits non-zero printing a complete, actionable report to stderr (surfaced to the pusher as remote: lines); exits 0 only when there are zero violations."
     },
@@ -46,8 +61,32 @@
       "implements": []
     },
     {
+      "name": "Forwarding",
+      "description": "Forward() pushes each accepted, non-default, non-deletion ref update to the configured upstream remote with the proxy's credentials. ForwardConfig {UpstreamRemote, DefaultBranch}; the default branch is never forwarded.",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
       "name": "PreReceiveCommand",
-      "description": "The `portitor pre-receive` subcommand: parses stdin ref updates, loads config from env (PORTITOR_DEFAULT_BRANCH, PORTITOR_ALLOWED_SIGNERS, GIT_DIR), runs Gate.Check, and maps the result to an exit code + stderr report.",
+      "description": "The `portitor pre-receive` subcommand: parses stdin ref updates, loads settings from the PORTITOR_CONFIG JSON file (gate.Config + upstream_remote) with env overrides (PORTITOR_DEFAULT_BRANCH, PORTITOR_ALLOWED_SIGNERS, PORTITOR_UPSTREAM_REMOTE; repo dir from GIT_DIR), runs Gate.Check, and maps the result to an exit code + stderr report.",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "PostReceiveCommand",
+      "description": "The `portitor post-receive` subcommand: parses stdin ref updates, loads the same settings, runs gate.Forward, and reports each forwarded/failed ref (non-zero exit if any forward failed).",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "InitRepoCommand",
+      "description": "The `portitor init-repo` subcommand: creates the gated bare repo, optionally mirrors/seeds from upstream, and installs the pre-receive/post-receive hook shims wired to PORTITOR_CONFIG.",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "Container",
+      "description": "Deployment: a multi-stage Dockerfile builds the static portitor binary and runs it in a minimal Alpine image as a key-only git-over-SSH server (user 'git', repos on the /srv/git volume). deploy/entrypoint.sh generates host keys, installs AGENT_AUTHORIZED_KEY, and runs sshd under tini. The proxy is its own container, separate from the agent image.",
       "content": "arch_pre_receive.md",
       "implements": []
     }

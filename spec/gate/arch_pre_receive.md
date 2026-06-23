@@ -82,8 +82,33 @@ rule supplied externally, not hardcoded): *"only reviewer/owner may close a bead
 `{PathGlob: ".beads/issues.jsonl", AddedRegex: "\"status\"\\s*:\\s*\"closed\"", AllowedRoles: ["reviewer","owner"]}`.
 An untrusted commit (`%G? != G`) is rejected before any role rule (its role can't be trusted).
 
+## Ancestry / fresh base
+
+Opt-in via `Config.RequireUpToDateWithDefault`. For a non-default ref update, the new tip must be a
+descendant of the current default branch (`git merge-base --is-ancestor <default> <new>`); otherwise
+a `stale-base` violation forces a rebase before the work can land. The default branch is exempt, and
+the check is skipped entirely when the flag is unset.
+
+## Forwarding (`post-receive`)
+
+After `pre-receive` accepts a push, `gate.Forward` (run by `portitor post-receive`) pushes each
+accepted, **non-default, non-deletion** ref to the configured upstream remote (`Config.UpstreamRemote`,
+default `upstream`) using credentials held only by the proxy — the agent never sees an upstream
+credential. The default branch is never forwarded (it is PR/owner territory and `pre-receive` rejects
+pushes to it). Each ref's outcome is reported; a failed forward yields a non-zero exit.
+
+## Provisioning (`init-repo`) and deployment
+
+`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates
+the gated bare repo, optionally adds and fetches the upstream remote and seeds the default branch
+from it (so agents clone the default from the proxy with no upstream credential), and installs the
+`pre-receive`/`post-receive` hook shims (each exports `PORTITOR_CONFIG` and execs the matching
+subcommand). The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
+key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
+sshd under tini) — separate from the agent image, which holds no upstream credential.
+
 ## Boundaries
 
 The gate is generic: it knows nothing of beads/spex; domain rules (role rules, the role map) are
-external config. Still to build on this core: forwarding (`post-receive` of accepted feature
-branches), ancestry/fresh-base checks, and GitHub-action execution from intent artifacts.
+external config. Still to build on this core: GitHub-action execution from verified intent artifacts
+and read-side fetch of GitHub state into the agent's bundle.
