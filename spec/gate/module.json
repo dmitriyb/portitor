@@ -1,0 +1,45 @@
+{
+  "name": "gate",
+  "description": "portitor's push-verification core: the checks a git pre-receive runs against an incoming push, inspecting the resulting objects/refs (not commands). Generic git-gateway logic with no beads/spex knowledge. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
+  "requirements": [
+    {
+      "type": "functional",
+      "title": "Reject pushes to the default branch",
+      "description": "A ref update targeting refs/heads/<default> (push or deletion) is a violation. The default branch is taken from Config.DefaultBranch, else derived from the receiving repo's HEAD symref."
+    },
+    {
+      "type": "functional",
+      "title": "Require every new commit to be signed by an allowed signer",
+      "description": "Each commit an update introduces (git rev-list old..new, or new --not --all on create) must verify via `git verify-commit` against an allowed_signers file. No signature, bad signature, or untrusted signer is a violation."
+    },
+    {
+      "type": "functional",
+      "title": "Reject the whole push atomically with all violations",
+      "description": "pre-receive runs once per push over git's object quarantine. portitor collects every violation across all refs/commits and, if any exist, exits non-zero printing a complete, actionable report to stderr (surfaced to the pusher as remote: lines); exits 0 only when there are zero violations."
+    },
+    {
+      "type": "non-functional",
+      "title": "Delegate cryptography to git",
+      "description": "Signature verification is performed by `git verify-commit` against allowed_signers; portitor orchestrates and decides. Keeps the trust in git, not in portitor's own crypto."
+    },
+    {
+      "type": "non-functional",
+      "title": "Gate is a pure, isolation-testable function",
+      "description": "Check(repoDir, updates, cfg) -> ([]Violation, error) shells out only to git for facts, so it is testable with ephemeral throwaway keys and a temp bare repo — no real credentials or hardware."
+    }
+  ],
+  "components": [
+    {
+      "name": "Gate",
+      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, and per-commit signature verification via git.",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "PreReceiveCommand",
+      "description": "The `portitor pre-receive` subcommand: parses stdin ref updates, loads config from env (PORTITOR_DEFAULT_BRANCH, PORTITOR_ALLOWED_SIGNERS, GIT_DIR), runs Gate.Check, and maps the result to an exit code + stderr report.",
+      "content": "arch_pre_receive.md",
+      "implements": []
+    }
+  ]
+}

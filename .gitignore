@@ -1,0 +1,8 @@
+# Built binaries
+/portitor
+/dist/
+*.test
+
+# Editor / OS
+*.swp
+.DS_Store
