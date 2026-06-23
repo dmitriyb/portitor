@@ -24,6 +24,20 @@ rules.
    pushed and its ref deleted on the bare side (objects remain, ref gone); a signed new branch →
    zero violations.
 
+## Role rules (`role_test.go`)
+
+Two identities (implementer + reviewer keys, each in `allowed_signers`), `Roles` mapping each key
+fingerprint to a role, and a `bead-close-requires-review` rule (path `.beads/issues.jsonl`, added
+regex `"status":"closed"`, roles `[reviewer, owner]`):
+
+6. **implementer closes a bead** (commit adds the closed line, signed by the implementer key) →
+   violation, rule `bead-close-requires-review`.
+7. **reviewer closes the same bead** → zero violations.
+8. **implementer makes a non-close change** (no diff to `.beads/issues.jsonl`) → zero violations.
+
+These confirm role attribution is by signing **key** (the implementer can't masquerade as reviewer
+without the reviewer key), and that the content rule keys off the diff, not the actor's claim.
+
 ## End-to-end (real push)
 
 Beyond the unit tests, the `portitor` binary is installed as an actual `pre-receive` hook on a bare

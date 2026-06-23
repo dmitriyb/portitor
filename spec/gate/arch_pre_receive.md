@@ -42,10 +42,13 @@ Every commit an update *introduces* must carry a good signature from a signer li
 Each is verified with:
 
 ```
-git -C <repo> -c gpg.ssh.allowedSignersFile=<allowed_signers> verify-commit <sha>
+git -C <repo> -c gpg.ssh.allowedSignersFile=<allowed_signers> show -s --format=%G?%n%GF%n%GS <sha>
 ```
 
-A non-zero exit (no signature, bad signature, or signer not in `allowed_signers`) is a violation.
+`%G?` must be `G` (good signature from a trusted/allowed signer); anything else — `N` (none),
+`B` (bad), `U` (good but signer not in `allowed_signers`), `E` (error) — is a violation. The same
+call yields `%GF` (the signer key fingerprint, used for role mapping below) and `%GS` (the matched
+principal).
 
 ## Atomicity & reporting
 
@@ -61,8 +64,26 @@ remote:   [unsigned-or-untrusted-commit] refs/heads/feature: commit a1b2c3d4e5f6
 
 The agent reads these and fixes everything in one correction pass.
 
+## Role-gated content rules
+
+Identity is a **credential, not a label**: each commit's signer key fingerprint (`%GF`) maps to a
+**role** via `Config.Roles` (fingerprint → role). A container holding only one role's key cannot
+sign as another role, so the role is unforgeable.
+
+A `RoleRule` then gates *content* by role, generically (no beads/spex knowledge built in):
+
+```
+RoleRule{ Name, PathGlob, AddedRegex, AllowedRoles }
+```
+
+For each introduced commit, if its diff to `PathGlob` adds a line matching `AddedRegex`, the
+signer's role must be in `AllowedRoles` — else a violation named `Name`. Example config (a beads
+rule supplied externally, not hardcoded): *"only reviewer/owner may close a bead"* →
+`{PathGlob: ".beads/issues.jsonl", AddedRegex: "\"status\"\\s*:\\s*\"closed\"", AllowedRoles: ["reviewer","owner"]}`.
+An untrusted commit (`%G? != G`) is rejected before any role rule (its role can't be trusted).
+
 ## Boundaries
 
-The gate is generic: it knows nothing of beads/spex. Role mapping (signer fingerprint → role),
-forwarding (`post-receive`), ancestry, and content rules (e.g. `.beads/issues.jsonl` transitions)
-build on this core in later slices; domain rules arrive as external config, not built-in.
+The gate is generic: it knows nothing of beads/spex; domain rules (role rules, the role map) are
+external config. Still to build on this core: forwarding (`post-receive` of accepted feature
+branches), ancestry/fresh-base checks, and GitHub-action execution from intent artifacts.

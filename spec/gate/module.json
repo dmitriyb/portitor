@@ -10,7 +10,17 @@
     {
       "type": "functional",
       "title": "Require every new commit to be signed by an allowed signer",
-      "description": "Each commit an update introduces (git rev-list old..new, or new --not --all on create) must verify via `git verify-commit` against an allowed_signers file. No signature, bad signature, or untrusted signer is a violation."
+      "description": "Each commit an update introduces (git rev-list old..new, or new --not --all on create) must have git signature verdict %G? == G against an allowed_signers file. None (N), bad (B), untrusted/not-in-allowed-signers (U), or error (E) is a violation."
+    },
+    {
+      "type": "functional",
+      "title": "Attribute each commit to a role by signing-key fingerprint",
+      "description": "The signer key fingerprint (git %GF) maps to a role via Config.Roles (fingerprint -> role). Identity is a credential, not a label: a container holding only one role's key cannot sign as another role. Untrusted commits (verdict != G) are rejected before role evaluation."
+    },
+    {
+      "type": "functional",
+      "title": "Enforce role-gated content rules",
+      "description": "A RoleRule {Name, PathGlob, AddedRegex, AllowedRoles} requires that any introduced commit whose diff to PathGlob adds a line matching AddedRegex be signed by a role in AllowedRoles, else a violation named Name. Generic mechanism; domain rules (e.g. 'only reviewer/owner may close a bead' on .beads/issues.jsonl) are supplied as external config, not built in."
     },
     {
       "type": "functional",
@@ -31,7 +41,7 @@
   "components": [
     {
       "name": "Gate",
-      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, and per-commit signature verification via git.",
+      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and role-gated content rules.",
       "content": "arch_pre_receive.md",
       "implements": []
     },
