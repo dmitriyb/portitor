@@ -3,7 +3,7 @@
 // objects/refs being landed) rather than any command. It is the hard gate —
 // every path to "landing" goes through it.
 //
-// The crypto is delegated to git itself (`git verify-commit` against an
+// The crypto is delegated to git itself (the %G? signature verdict against an
 // allowed_signers file); this package orchestrates and decides.
 package gate
 
@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
@@ -32,15 +33,31 @@ func (u RefUpdate) IsDelete() bool { return isZero(u.NewSHA) }
 
 func isZero(s string) bool { return s == "" || strings.Trim(s, "0") == "" }
 
+// RoleRule requires that any introduced commit whose diff to PathGlob adds a line
+// matching AddedRegex be signed by a signer whose role is in AllowedRoles. It lets
+// generic portitor enforce domain rules (e.g. "only reviewer/owner may close a
+// bead") from config, without built-in knowledge of beads/spex.
+type RoleRule struct {
+	Name         string   // stable identifier, surfaced as the violation rule
+	PathGlob     string   // git pathspec the commit's diff must touch
+	AddedRegex   string   // regex; matched against ADDED lines in that path's diff
+	AllowedRoles []string // the signer's role must be one of these
+}
+
 // Config controls the checks.
 type Config struct {
 	// DefaultBranch is the protected branch (e.g. "main"). If empty, it is derived
 	// from the receiving repo's HEAD symref.
 	DefaultBranch string
 	// AllowedSigners is the path to an OpenSSH allowed_signers file listing the
-	// commit signers portitor trusts. If empty, signatures cannot be verified and
+	// commit signers portitor trusts. If empty, signatures cannot be trusted and
 	// every commit is treated as untrusted.
 	AllowedSigners string
+	// Roles maps a signer key fingerprint (as git reports it via %GF, e.g.
+	// "SHA256:...") to a role name. Unmapped signers have the empty role.
+	Roles map[string]string
+	// RoleRules are evaluated against every introduced commit.
+	RoleRules []RoleRule
 }
 
 // Violation is a single rejected condition. Rule is a stable identifier; Detail
@@ -67,6 +84,11 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 	}
 	defRef := "refs/heads/" + def
 
+	rules, err := compileRules(cfg.RoleRules)
+	if err != nil {
+		return nil, err
+	}
+
 	var vs []Violation
 	for _, u := range updates {
 		// Rule: never push to (or delete) the default branch.
@@ -83,27 +105,62 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 		}
 
 		if u.IsDelete() {
-			continue // nothing to sign-check on a deletion
+			continue // nothing to sign- or role-check on a deletion
 		}
 
-		// Rule: every newly-introduced commit must carry a good signature from an
-		// allowed signer. Checking the result means it holds regardless of how the
-		// commit was produced (git, plumbing, libgit2, ...).
 		commits, err := newCommits(repoDir, u)
 		if err != nil {
 			return nil, fmt.Errorf("list commits for %s: %w", u.Ref, err)
 		}
 		for _, c := range commits {
-			if ok, reason := verifyCommit(repoDir, c, cfg.AllowedSigners); !ok {
+			// Rule: every introduced commit must be signed by an allowed signer.
+			status, fp, _ := commitSig(repoDir, c, cfg.AllowedSigners)
+			if status != "G" {
 				vs = append(vs, Violation{
 					Ref:    u.Ref,
 					Rule:   "unsigned-or-untrusted-commit",
-					Detail: fmt.Sprintf("commit %s is not signed by an allowed signer (%s)", shortSHA(c), reason),
+					Detail: fmt.Sprintf("commit %s is not signed by an allowed signer (%s)", shortSHA(c), sigReason(status)),
 				})
+				continue // an untrusted signer's role can't be trusted; skip role rules
+			}
+
+			// Rule(s): role-gated content. The signer's role comes from its key
+			// fingerprint (a credential, not a forgeable label).
+			role := cfg.Roles[fp]
+			for _, r := range rules {
+				match, err := commitMatchesRule(repoDir, c, r)
+				if err != nil {
+					return nil, err
+				}
+				if match && !contains(r.AllowedRoles, role) {
+					vs = append(vs, Violation{
+						Ref:    u.Ref,
+						Rule:   r.Name,
+						Detail: fmt.Sprintf("commit %s requires signer role in %v, but the signer's role is %s", shortSHA(c), r.AllowedRoles, roleLabel(role)),
+					})
+				}
 			}
 		}
 	}
 	return vs, nil
+}
+
+// compiledRule is a RoleRule with its regex pre-compiled.
+type compiledRule struct {
+	RoleRule
+	re *regexp.Regexp
+}
+
+func compileRules(rules []RoleRule) ([]compiledRule, error) {
+	out := make([]compiledRule, 0, len(rules))
+	for _, r := range rules {
+		re, err := regexp.Compile(r.AddedRegex)
+		if err != nil {
+			return nil, fmt.Errorf("role rule %q: bad AddedRegex: %w", r.Name, err)
+		}
+		out = append(out, compiledRule{RoleRule: r, re: re})
+	}
+	return out, nil
 }
 
 // defaultBranch reads the repo's HEAD symref (e.g. "main").
@@ -116,8 +173,6 @@ func defaultBranch(repoDir string) (string, error) {
 }
 
 // newCommits lists the commits an update introduces that aren't already present.
-// For a branch creation it excludes commits reachable from existing refs (so old
-// history isn't re-verified); otherwise it walks old..new.
 func newCommits(repoDir string, u RefUpdate) ([]string, error) {
 	var args []string
 	if u.IsCreate() {
@@ -139,24 +194,40 @@ func newCommits(repoDir string, u RefUpdate) ([]string, error) {
 	return commits, nil
 }
 
-// verifyCommit reports whether sha has a good signature from a signer listed in
-// allowedSigners. git does the cryptographic verification.
-func verifyCommit(repoDir, sha, allowedSigners string) (ok bool, reason string) {
+// commitSig returns git's signature verdict for a commit: status is the %G? code
+// ("G" good+trusted, "U" good+untrusted, "B" bad, "N" none, "E" error), fingerprint
+// is %GF (e.g. "SHA256:..."), and signer is %GS (the matched principal).
+func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer string) {
 	args := []string{"-C", repoDir}
 	if allowedSigners != "" {
 		args = append(args, "-c", "gpg.ssh.allowedSignersFile="+allowedSigners)
 	}
-	args = append(args, "verify-commit", sha)
-	cmd := exec.Command("git", args...)
-	var errb strings.Builder
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		if r := strings.TrimSpace(firstLine(errb.String())); r != "" {
-			return false, r
-		}
-		return false, "no valid signature"
+	args = append(args, "show", "-s", "--format=%G?%n%GF%n%GS", sha)
+	out, _ := exec.Command("git", args...).Output() // verdict is in the output, not the exit code
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	for len(lines) < 3 {
+		lines = append(lines, "")
 	}
-	return true, ""
+	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2])
+}
+
+// commitMatchesRule reports whether the commit's diff to rule.PathGlob adds a line
+// matching the rule's regex.
+func commitMatchesRule(repoDir, sha string, r compiledRule) (bool, error) {
+	out, err := git(repoDir, "show", "--format=", "--unified=0", sha, "--", r.PathGlob)
+	if err != nil {
+		return false, err
+	}
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			if r.re.MatchString(line) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // git runs `git -C repoDir <args...>` and returns stdout, wrapping errors with stderr.
@@ -171,16 +242,40 @@ func git(repoDir string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func sigReason(status string) string {
+	switch status {
+	case "N":
+		return "no signature"
+	case "B":
+		return "bad signature"
+	case "U":
+		return "signer not in allowed_signers"
+	case "E":
+		return "signature could not be checked"
+	default:
+		return "no valid signature"
+	}
+}
+
+func roleLabel(role string) string {
+	if role == "" {
+		return "unknown (signer not mapped to a role)"
+	}
+	return fmt.Sprintf("%q", role)
+}
+
 func shortSHA(s string) string {
 	if len(s) > 12 {
 		return s[:12]
-	}
-	return s
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
 	}
 	return s
 }
