@@ -1,0 +1,62 @@
+{
+  "name": "action",
+  "description": "portitor's GitHub-action mediation: the actions portitor performs on the upstream with its own credential (PR open/comment/review/merge/close + read-side fetch), and the SSH forced-command that dispatches a connection to either the git pack commands or the role-gated action API. The agent never holds a GitHub credential and never runs gh; portitor re-derives every action's authority from verified git state or the caller's role. NOTE: hand-authored SEED in spexmachina's format; identity hashes are generated when run through spex.",
+  "requirements": [
+    {
+      "type": "functional",
+      "title": "No gh passthrough — constrained mediation only",
+      "description": "Every GitHub action is performed by portitor as a consequence of verified git state or as a narrow, role-validated operation whose target portitor can tie back to managed work. gh arguments are constructed by portitor (internal/action), never forwarded from the agent, so the agent cannot run arbitrary gh."
+    },
+    {
+      "type": "functional",
+      "title": "Auto-open a PR when a feature branch is forwarded",
+      "description": "On post-receive, after an accepted non-default branch is forwarded upstream, portitor opens a PR itself: head = the gated branch, base = the default branch, title from the branch's tip commit subject, body from the branch's commit messages (git log default..branch). It is not an agent command. Idempotent: if an open PR already exists for the branch (e.g. a self-correction re-push), the existing number is returned instead of opening a duplicate."
+    },
+    {
+      "type": "functional",
+      "title": "Role-gated pr action API",
+      "description": "`portitor pr <comment|review|merge|close|fetch> --pr N` performs one action with the upstream credential after checking the caller's role: comment/fetch for any known role; review (verdict) for reviewer/owner; merge/close for the dedicated merger/owner only. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+    },
+    {
+      "type": "functional",
+      "title": "Merge requires the merger credential and a re-derived approval",
+      "description": "merge is available only to the merger role (a dedicated SSH key -> fingerprint -> merger in the role map; the role never commits, the key is identity-only) or owner. Before merging, portitor re-derives the PR's approval state (reviewDecision == APPROVED) rather than trusting the request; an unapproved PR is refused. The merger credential is optional — if no merger key is provisioned, merge is unavailable via portitor."
+    },
+    {
+      "type": "functional",
+      "title": "SSH forced-command dispatch (portitor shell)",
+      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; everything else is rejected. One key thus grants gated git + the narrow action API and nothing more."
+    },
+    {
+      "type": "non-functional",
+      "title": "Routing is a pure, testable function",
+      "description": "The security-critical dispatch (classify), role policy (roleCan), repo-path confinement (allowedRepoPath), command tokenizing (shellSplit), and slug derivation (deriveSlug) are pure functions, unit-tested without a network. The gh layer (internal/action) is tested with a stubbed runner."
+    }
+  ],
+  "components": [
+    {
+      "name": "ActionClient",
+      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Review, Merge, ClosePR, Fetch, MergeApproved) pinned to one repo slug via -R; a swappable Runner makes it testable with stubbed gh.",
+      "content": "arch_action.md",
+      "implements": []
+    },
+    {
+      "name": "AutoOpenPR",
+      "description": "post-receive opens a PR per forwarded feature branch (title from tip commit, body from commit messages), idempotently, and prints the receipt.",
+      "content": "arch_action.md",
+      "implements": []
+    },
+    {
+      "name": "PrCommand",
+      "description": "`portitor pr` handler: parses the action + --pr/--event, checks roleCan(role, act), reads the body from stdin, and dispatches to ActionClient; merge re-derives approval.",
+      "content": "arch_action.md",
+      "implements": []
+    },
+    {
+      "name": "ShellDispatcher",
+      "description": "`portitor shell <fingerprint>`: classify() routes SSH_ORIGINAL_COMMAND to git pack (exec, gate runs) or the role-gated pr API (role from fingerprint), rejecting anything else; allowedRepoPath confines pack commands.",
+      "content": "arch_action.md",
+      "implements": []
+    }
+  ]
+}
