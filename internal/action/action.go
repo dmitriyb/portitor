@@ -123,10 +123,12 @@ func (g GH) ClosePR(pr int) error {
 	return err
 }
 
-// Fetch returns a PR's review state as JSON (reviews/comments/commits) — the
-// read-side that feeds the review/fix bundle in place of direct gh access.
+// Fetch returns a PR's review state as JSON (branch refs + reviews/comments/
+// commits) — the read-side that feeds the review/fix bundle in place of direct
+// gh access. headRefName lets the prelude check out the PR branch.
 func (g GH) Fetch(pr int) (string, error) {
-	return g.run("pr", "view", strconv.Itoa(pr), "--json", "number,title,body,state,reviews,comments,commits")
+	return g.run("pr", "view", strconv.Itoa(pr), "--json",
+		"number,title,body,state,headRefName,baseRefName,reviews,comments,commits")
 }
 
 // MergeApproved reports whether the PR has at least one APPROVED review and no
