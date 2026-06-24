@@ -19,9 +19,9 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -o /out/portitor ./cmd/portitor
 
-# --- runtime: minimal git-over-ssh server ---
+# --- runtime: minimal git-over-ssh server (+ gh for the action API) ---
 FROM alpine:3.20
-RUN apk add --no-cache git openssh-server tini \
+RUN apk add --no-cache git openssh-server tini github-cli \
     && adduser -D -s /bin/sh git \
     && mkdir -p /srv/git /home/git/.ssh \
     && chown -R git:git /srv/git /home/git \
