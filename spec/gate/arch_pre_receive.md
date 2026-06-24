@@ -110,5 +110,6 @@ sshd under tini) — separate from the agent image, which holds no upstream cred
 ## Boundaries
 
 The gate is generic: it knows nothing of beads/spex; domain rules (role rules, the role map) are
-external config. Still to build on this core: GitHub-action execution from verified intent artifacts
-and read-side fetch of GitHub state into the agent's bundle.
+external config. GitHub actions (PR open/comment/review/merge/close + read-side fetch) are handled
+by the **action** module over the same SSH channel — NOT via intent artifacts, and never as a `gh`
+passthrough (see `spec/action`).
