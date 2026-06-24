@@ -24,7 +24,10 @@ ssh-keygen -A # host keys
 # config (so post-receive + `portitor pr` use it with no env) and point git's
 # credential helper at gh (so `git push upstream` over HTTPS authenticates too).
 if [ -n "${GH_TOKEN:-}" ]; then
-	printf '%s' "$GH_TOKEN" | su git -c 'gh auth login --with-token && gh auth setup-git'
+	# `gh auth login --with-token` refuses to STORE while GH_TOKEN is set in the
+	# env (it would just use the env value); unset it in the subshell so the token
+	# is persisted to the git user's gh config for later sessions.
+	printf '%s' "$GH_TOKEN" | su git -c 'unset GH_TOKEN; gh auth login --with-token && gh auth setup-git'
 	unset GH_TOKEN # don't leave it in the sshd environment
 fi
 

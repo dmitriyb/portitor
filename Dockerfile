@@ -23,6 +23,9 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/portitor ./cmd/portitor
 FROM alpine:3.20
 RUN apk add --no-cache git openssh-server tini github-cli \
     && adduser -D -s /bin/sh git \
+    # adduser -D leaves the account locked (! in shadow); sshd refuses pubkey
+    # login to a locked account ("invalid user"). Mark it valid-but-passwordless.
+    && sed -i 's/^git:!/git:*/' /etc/shadow \
     && mkdir -p /srv/git /home/git/.ssh \
     && chown -R git:git /srv/git /home/git \
     && chmod 700 /home/git/.ssh \
