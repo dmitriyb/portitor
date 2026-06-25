@@ -62,7 +62,8 @@ key is provisioned, merge/close are simply unavailable through portitor (a human
 ## Boundaries
 
 `internal/action` constructs all `gh` arguments and is the only place portitor shells to `gh`; a
-swappable `Runner` keeps it unit-testable. Provisioning the agent/merger keys into portitor's
-`authorized_keys` with the `command="portitor shell <fp>"` wrapper is a deployment concern (the
-portitor container entrypoint). Richer review payloads (inline review comments) extend the `pr review`
-action without changing this model.
+swappable `Runner` keeps it unit-testable. Deployment wiring lives in `deploy/entrypoint.sh`: it
+installs each agent/role key into `authorized_keys` with the `command="portitor shell <fp>"` forced
+wrapper (`restrict`ed), and gives portitor its GitHub credential from `GH_TOKEN` via `gh auth login`
++ `gh auth setup-git` — one PAT serving both `gh pr` and `git push upstream`. Richer review payloads
+(inline review comments) extend the `pr review` action without changing this model.
