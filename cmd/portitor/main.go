@@ -46,8 +46,10 @@ func main() {
 		os.Exit(initRepo(os.Args[2:]))
 	case "shell":
 		os.Exit(shellCommand(os.Args[2:]))
+	case "add-repo":
+		os.Exit(addRepo(os.Args[2:]))
 	case "pr":
-		os.Exit(prCommand(os.Getenv("PORTITOR_ROLE"), os.Args[2:]))
+		os.Exit(prCommand(os.Getenv("PORTITOR_FINGERPRINT"), os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "portitor: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -56,7 +58,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|shell|pr>")
+	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|shell|pr>")
 }
 
 func loadSettings() (settings, error) {
@@ -90,6 +92,39 @@ func repoDir() string {
 		return d
 	}
 	return "."
+}
+
+// reposDir is the registry holding one <repo>.json per managed repo. init-repo
+// points each bare's hook config here too, so the gate and the action API read
+// the same per-repo config.
+func reposDir() string {
+	if d := os.Getenv("PORTITOR_REPOS_DIR"); d != "" {
+		return d
+	}
+	return "/etc/portitor/repos.d"
+}
+
+// reposRoot is where the bare repos live.
+func reposRoot() string {
+	if d := os.Getenv("PORTITOR_REPO_ROOT"); d != "" {
+		return d
+	}
+	return "/srv/git"
+}
+
+// resolveRepoConfig loads one repo's config (its roles + upstream slug + rules)
+// for the action API, so `portitor pr --repo X` acts on X with X's settings.
+func resolveRepoConfig(repo string) (settings, error) {
+	var s settings
+	path := filepath.Join(reposDir(), repo+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return s, fmt.Errorf("read repo config %s: %w", path, err)
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		return s, fmt.Errorf("parse repo config %s: %w", path, err)
+	}
+	return s, nil
 }
 
 // preReceive runs the gate; exit 0 accepts the push, non-zero rejects it.
@@ -206,7 +241,7 @@ func roleCan(role, act string) bool {
 	return false
 }
 
-func prCommand(role string, args []string) int {
+func prCommand(fp string, args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "portitor pr: action required (comment|review|merge|close|fetch)")
 		return 2
@@ -215,33 +250,42 @@ func prCommand(role string, args []string) int {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
 	pr := fs.Int("pr", 0, "PR number")
 	event := fs.String("event", "", "review event: approve|request-changes|comment")
+	repo := fs.String("repo", "", "repository name (selects the per-repo config)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if role == "" {
-		fmt.Fprintln(os.Stderr, "portitor pr: no role (unknown key)")
-		return 1
-	}
-	if !roleCan(role, act) {
-		fmt.Fprintf(os.Stderr, "portitor pr: role %q may not %q\n", role, act)
-		return 1
-	}
 	if act != "comment" && act != "review" && act != "merge" && act != "close" && act != "fetch" {
 		fmt.Fprintf(os.Stderr, "portitor pr: unknown action %q\n", act)
+		return 2
+	}
+	if *repo == "" {
+		fmt.Fprintln(os.Stderr, "portitor pr: --repo <name> required")
 		return 2
 	}
 	if *pr <= 0 {
 		fmt.Fprintln(os.Stderr, "portitor pr: --pr <number> required")
 		return 2
 	}
-	s, err := loadSettings()
+	// Per-repo config: the role map + upstream slug come from THIS repo's config,
+	// so one portitor mediates many repos. The role is re-derived from the signer
+	// fingerprint against that repo's roles (a credential, not a passed-in label).
+	s, err := resolveRepoConfig(*repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
 		return 1
 	}
+	role := s.Roles[fp]
+	if role == "" {
+		fmt.Fprintf(os.Stderr, "portitor pr: key has no role for repo %q\n", *repo)
+		return 1
+	}
+	if !roleCan(role, act) {
+		fmt.Fprintf(os.Stderr, "portitor pr: role %q may not %q\n", role, act)
+		return 1
+	}
 	gh := ghClient(s)
 	if gh.Repo == "" {
-		fmt.Fprintln(os.Stderr, "portitor pr: no upstream slug configured")
+		fmt.Fprintf(os.Stderr, "portitor pr: no upstream slug configured for repo %q\n", *repo)
 		return 1
 	}
 	switch act {
@@ -330,17 +374,9 @@ func shellCommand(args []string) int {
 		}
 		return 0
 	case "pr":
-		s, err := loadSettings()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "portitor: %v\n", err)
-			return 1
-		}
-		role := s.Roles[fp]
-		if role == "" {
-			fmt.Fprintln(os.Stderr, "portitor: unknown key (no role)")
-			return 1
-		}
-		return prCommand(role, rest) // rest = pr args after "portitor pr"
+		// Pass the fingerprint through; prCommand re-derives the role from the
+		// target repo's config (per-repo role map).
+		return prCommand(fp, rest) // rest = pr args after "portitor pr"
 	default:
 		fmt.Fprintln(os.Stderr, "portitor: command not allowed")
 		return 1
@@ -512,6 +548,30 @@ func initRepo(args []string) int {
 	fmt.Printf("portitor: initialized bare repo %s (default=%s, config=%s%s)\n",
 		*bare, *def, cfg, upstreamNote(*upstream))
 	return 0
+}
+
+// addRepo provisions a managed repo using the registry conventions: bare at
+// <repos-root>/<name>.git and per-repo config at <repos-dir>/<name>.json (placed
+// there first). It is init-repo with the paths derived from the repo name.
+func addRepo(args []string) int {
+	fs := flag.NewFlagSet("add-repo", flag.ContinueOnError)
+	name := fs.String("repo", "", "repository name (required)")
+	def := fs.String("default", "main", "default branch")
+	upstream := fs.String("upstream", "", "upstream URL to mirror and forward to")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "add-repo: --repo is required")
+		return 2
+	}
+	cfg := filepath.Join(reposDir(), *name+".json")
+	if _, err := os.Stat(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "add-repo: place the repo config at %s first\n", cfg)
+		return 1
+	}
+	bare := filepath.Join(reposRoot(), *name+".git")
+	return initRepo([]string{"--bare", bare, "--default", *def, "--upstream", *upstream, "--config", cfg})
 }
 
 func upstreamNote(u string) string {

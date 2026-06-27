@@ -1,9 +1,33 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestResolveRepoConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PORTITOR_REPOS_DIR", dir)
+	cfg := `{"upstream_slug":"o/r","roles":{"SHA256:abc":"implementer","SHA256:def":"reviewer"}}`
+	if err := os.WriteFile(filepath.Join(dir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := resolveRepoConfig("myrepo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UpstreamSlug != "o/r" {
+		t.Fatalf("slug = %q", s.UpstreamSlug)
+	}
+	if s.Roles["SHA256:abc"] != "implementer" || s.Roles["SHA256:def"] != "reviewer" {
+		t.Fatalf("roles = %v", s.Roles)
+	}
+	if _, err := resolveRepoConfig("does-not-exist"); err == nil {
+		t.Fatal("expected error for a missing repo config")
+	}
+}
 
 func TestClassify(t *testing.T) {
 	cases := []struct {
