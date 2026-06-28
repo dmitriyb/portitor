@@ -33,14 +33,17 @@ fi
 
 # Install each agent key with a forced command: the connection can only run the
 # `portitor shell` dispatcher (gated git pack OR the role-checked pr API), keyed
-# to the key's fingerprint. `restrict` disables pty/forwarding/etc.
+# to the key's fingerprint. `restrict` disables pty/forwarding/etc.;
+# `no-touch-required` is required because the role keys are no-touch resident
+# FIDO2 (sk) keys — their signatures carry user-presence=0, which sshd otherwise
+# rejects. (Touch-required keys still authenticate fine with this option set.)
 if [ -n "${AGENT_AUTHORIZED_KEY:-}" ]; then
 	install -d -m 700 -o git -g git /home/git/.ssh
 	: >/home/git/.ssh/authorized_keys
 	printf '%s\n' "$AGENT_AUTHORIZED_KEY" | while IFS= read -r key; do
 		[ -n "$key" ] || continue
 		fp=$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')
-		printf 'command="PORTITOR_CONFIG=%s %s shell %s",restrict %s\n' \
+		printf 'command="PORTITOR_CONFIG=%s %s shell %s",restrict,no-touch-required %s\n' \
 			"$PORTITOR_CONFIG" "$PORTITOR_BIN" "$fp" "$key" \
 			>>/home/git/.ssh/authorized_keys
 	done
