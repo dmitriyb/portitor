@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"github.com/dmitriyb/portitor/internal/git"
 )
 
 // zeroSHA is git's all-zero object id, used for branch create (old) and delete (new).
@@ -146,14 +148,22 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 			}
 
 			// Rule(s): role-gated content. The signer's role comes from its key
-			// fingerprint (a credential, not a forgeable label).
+			// fingerprint (a credential, not a forgeable label). Cache the per-pathglob
+			// diff for THIS commit so rules sharing a path don't re-shell git (the diff
+			// for a given pathglob is identical regardless of which rule asked).
 			role := cfg.Roles[fp]
+			diffCache := map[string]string{}
 			for _, r := range rules {
-				match, err := commitMatchesRule(repoDir, c, r)
-				if err != nil {
-					return nil, err
+				diff, ok := diffCache[r.PathGlob]
+				if !ok {
+					d, err := git.Output(repoDir, "show", "--format=", "--unified=0", c, "--", r.PathGlob)
+					if err != nil {
+						return nil, err
+					}
+					diff = d
+					diffCache[r.PathGlob] = d
 				}
-				if match && !contains(r.AllowedRoles, role) {
+				if diffAddsMatch(diff, r.re) && !contains(r.AllowedRoles, role) {
 					vs = append(vs, Violation{
 						Ref:    u.Ref,
 						Rule:   r.Name,
@@ -186,7 +196,7 @@ func compileRules(rules []RoleRule) ([]compiledRule, error) {
 
 // defaultBranch reads the repo's HEAD symref (e.g. "main").
 func defaultBranch(repoDir string) (string, error) {
-	out, err := git(repoDir, "symbolic-ref", "--short", "HEAD")
+	out, err := git.Output(repoDir, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -201,7 +211,7 @@ func newCommits(repoDir string, u RefUpdate) ([]string, error) {
 	} else {
 		args = []string{"rev-list", u.OldSHA + ".." + u.NewSHA}
 	}
-	out, err := git(repoDir, args...)
+	out, err := git.Output(repoDir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -232,35 +242,21 @@ func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer
 	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2])
 }
 
-// commitMatchesRule reports whether the commit's diff to rule.PathGlob adds a line
-// matching the rule's regex.
-func commitMatchesRule(repoDir, sha string, r compiledRule) (bool, error) {
-	out, err := git(repoDir, "show", "--format=", "--unified=0", sha, "--", r.PathGlob)
-	if err != nil {
-		return false, err
-	}
-	sc := bufio.NewScanner(strings.NewReader(out))
+// diffAddsMatch reports whether a unified diff adds (a "+" line, not the "+++"
+// file header) a line matching re. Pure — the diff is produced by git with the
+// rule's pathspec applied, so path filtering keeps git's exact semantics.
+func diffAddsMatch(diff string, re *regexp.Regexp) bool {
+	sc := bufio.NewScanner(strings.NewReader(diff))
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // tolerate long diff lines
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			if r.re.MatchString(line) {
-				return true, nil
+			if re.MatchString(line) {
+				return true
 			}
 		}
 	}
-	return false, nil
-}
-
-// git runs `git -C repoDir <args...>` and returns stdout, wrapping errors with stderr.
-func git(repoDir string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", repoDir}, args...)...)
-	var out, errb strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
-	}
-	return out.String(), nil
+	return false
 }
 
 // staleBase reports whether newSHA fails to contain the current default-branch tip
@@ -270,7 +266,7 @@ func staleBase(repoDir, defRef, newSHA string) (bool, error) {
 	if !refExists(repoDir, defRef) {
 		return false, nil
 	}
-	tip, err := git(repoDir, "rev-parse", defRef)
+	tip, err := git.Output(repoDir, "rev-parse", defRef)
 	if err != nil {
 		return false, err
 	}

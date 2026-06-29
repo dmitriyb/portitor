@@ -3,6 +3,8 @@ package gate
 import (
 	"fmt"
 	"strings"
+
+	"github.com/dmitriyb/portitor/internal/git"
 )
 
 // ForwardConfig controls post-receive forwarding to the real upstream.
@@ -48,7 +50,7 @@ func Forward(repoDir string, updates []RefUpdate, cfg ForwardConfig) ([]ForwardR
 		if u.Ref == defRef || u.IsDelete() {
 			continue
 		}
-		out, err := git(repoDir, "push", remote, u.NewSHA+":"+u.Ref)
+		out, err := git.Output(repoDir, "push", remote, u.NewSHA+":"+u.Ref)
 		results = append(results, ForwardResult{Ref: u.Ref, Err: err, Output: strings.TrimSpace(out)})
 	}
 	return results, nil
