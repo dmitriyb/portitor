@@ -37,6 +37,7 @@ per-role rules. A container holding only one role's key cannot act as another ro
 | `portitor add-repo --repo <name> --upstream <url>` | operator | init-repo using the registry conventions |
 | `portitor shell <fingerprint>` | sshd forced command | dispatch a connection to git-pack or the `pr` API |
 | `portitor pr <action> --repo <name> --pr <n>` | the agent (via SSH) | one role-validated GitHub action |
+| `portitor validate-config [--config <path>]` | operator / entrypoint | fail fast if a repo config is missing/malformed (run at container boot) |
 
 ---
 
@@ -113,7 +114,9 @@ via `roles` above; `allowed_signers` only establishes that the signature is trus
 
 ### Roles
 
-Roles are arbitrary strings you choose; the built-in action-API policy is:
+Roles are arbitrary strings you choose; the built-in action-API policy is below.
+It mirrors `RoleActions` in `internal/action/policy.go` — the single source of truth
+(`action.RoleCan`); keep this table in sync if you add an action.
 
 | action | allowed roles |
 |---|---|
@@ -196,13 +199,34 @@ The `roles` map may repeat the same keys across repos (or differ per repo).
 
 ### Environment overrides
 
-A few operational fields can be overridden by env (not `roles`/`role_rules`):
-`PORTITOR_CONFIG` (the config path the hooks load), `PORTITOR_DEFAULT_BRANCH`,
-`PORTITOR_ALLOWED_SIGNERS`, `PORTITOR_UPSTREAM_REMOTE`, `PORTITOR_UPSTREAM_SLUG`,
-`PORTITOR_REPOS_DIR` (registry, default `/etc/portitor/repos.d`),
-`PORTITOR_REPO_ROOT` (bares, default `/srv/git`).
+Only **operational** fields can be overridden by env — never the gate-integrity
+fields. `default_branch` and `allowed_signers` come *solely* from the config file, so
+a stray/injected env var can't weaken the gate. Overridable: `PORTITOR_CONFIG` (the
+config path the hooks load), `PORTITOR_UPSTREAM_REMOTE`, `PORTITOR_UPSTREAM_SLUG`,
+`PORTITOR_REPOS_DIR` (registry, default `/etc/portitor/repos.d`), `PORTITOR_REPO_ROOT`
+(bares, default `/srv/git`).
 
 ---
+
+## Integration with the dca agent
+
+The dca/dce agents (in the dotfiles repo) reach portitor as the **only** git remote
+they can talk to; the contract:
+
+- **Clone/push:** `ssh://git@portitor/srv/git/<repo>.git`. `<repo>` is validated
+  (`[A-Za-z0-9._-]`) on both the git and `pr` paths — no traversal.
+- **Auth:** one per-role SSH key per agent, supplied to the container via
+  `AGENT_AUTHORIZED_KEY` (one public key per line). Each is installed with the forced
+  command `command="PORTITOR_CONFIG=… portitor shell <fp>",restrict,no-touch-required`
+  — so the key can only run gated git-pack + `portitor pr`.
+- **Config mount:** the per-repo configs live in `PORTITOR_CONFIG_DIR` (mounted
+  read-only at `/etc/portitor`; registry at `/etc/portitor/repos.d/<repo>.json`).
+- **GitHub:** portitor holds the `GH_TOKEN`; on an accepted push it forwards the
+  feature branch upstream and auto-opens the PR, printing `PR #<n> <url>` back to the
+  agent. The agent never sees the token. It fetches PR state with
+  `portitor pr fetch --repo <repo> --pr <n>` over the same SSH channel.
+- **Boot check:** the entrypoint runs `portitor validate-config` over every repo
+  config and refuses to start if any is invalid.
 
 ## Deployment
 

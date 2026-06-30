@@ -20,6 +20,12 @@ PORTITOR_BIN=/usr/local/bin/portitor
 
 ssh-keygen -A # host keys
 
+# GH token: prefer the mounted secret (/run/secrets/gh_token, from compose secrets) so
+# it never lands in the container's env / `docker inspect`; fall back to GH_TOKEN env.
+if [ -z "${GH_TOKEN:-}" ] && [ -f /run/secrets/gh_token ]; then
+	GH_TOKEN="$(cat /run/secrets/gh_token)"
+fi
+
 # Give the proxy its GitHub credential: persist the token to the git user's gh
 # config (so post-receive + `portitor pr` use it with no env) and point git's
 # credential helper at gh (so `git push upstream` over HTTPS authenticates too).
@@ -50,5 +56,17 @@ if [ -n "${AGENT_AUTHORIZED_KEY:-}" ]; then
 	chown git:git /home/git/.ssh/authorized_keys
 	chmod 600 /home/git/.ssh/authorized_keys
 fi
+
+# Fail fast on a broken/missing repo config instead of silently rejecting every push
+# later (an empty/unparseable config makes the gate distrust ALL commits). Validate
+# the default config plus every per-repo config in the registry; skip paths that
+# don't exist yet (a fresh deploy before `add-repo` has nothing to check).
+for cfg in "$PORTITOR_CONFIG" /etc/portitor/repos.d/*.json; do
+	[ -f "$cfg" ] || continue
+	"$PORTITOR_BIN" validate-config --config "$cfg" || {
+		echo "portitor entrypoint: refusing to start — $cfg is invalid (see above)" >&2
+		exit 1
+	}
+done
 
 exec /usr/sbin/sshd -D -e # foreground under tini

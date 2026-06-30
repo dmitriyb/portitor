@@ -10,7 +10,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,16 +20,10 @@ import (
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/action"
+	"github.com/dmitriyb/portitor/internal/config"
 	"github.com/dmitriyb/portitor/internal/gate"
+	"github.com/dmitriyb/portitor/internal/git"
 )
-
-// settings is portitor's per-repo configuration: gate checks + forwarding + the
-// upstream slug the action API targets.
-type settings struct {
-	gate.Config
-	UpstreamRemote string `json:"upstream_remote"`
-	UpstreamSlug   string `json:"upstream_slug"` // owner/name for gh; else derived from the upstream remote URL
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -48,6 +41,8 @@ func main() {
 		os.Exit(shellCommand(os.Args[2:]))
 	case "add-repo":
 		os.Exit(addRepo(os.Args[2:]))
+	case "validate-config":
+		os.Exit(validateConfig(os.Args[2:]))
 	case "pr":
 		os.Exit(prCommand(os.Getenv("PORTITOR_FINGERPRINT"), os.Args[2:]))
 	default:
@@ -58,33 +53,38 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|shell|pr>")
+	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|validate-config|shell|pr>")
 }
 
-func loadSettings() (settings, error) {
-	var s settings
-	if path := os.Getenv("PORTITOR_CONFIG"); path != "" {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return s, fmt.Errorf("read PORTITOR_CONFIG: %w", err)
+// validateConfig checks a repo config up front (at container boot / by an operator)
+// so a missing or malformed config fails LOUDLY here instead of silently rejecting
+// every push later (an empty config makes the gate distrust all commits). Exit 0 =
+// valid, non-zero = problems printed to stderr.
+func validateConfig(args []string) int {
+	fs := flag.NewFlagSet("validate-config", flag.ContinueOnError)
+	cfgPath := fs.String("config", os.Getenv("PORTITOR_CONFIG"), "repo config JSON (default: $PORTITOR_CONFIG)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "validate-config: no config path (set $PORTITOR_CONFIG or pass --config)")
+		return 2
+	}
+	s, err := config.LoadFile(*cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "validate-config: %v\n", err)
+		return 1
+	}
+	problems := config.Validate(s)
+	if len(problems) > 0 {
+		fmt.Fprintf(os.Stderr, "validate-config: %s is INVALID:\n", *cfgPath)
+		for _, p := range problems {
+			fmt.Fprintf(os.Stderr, "  - %s\n", p)
 		}
-		if err := json.Unmarshal(b, &s); err != nil {
-			return s, fmt.Errorf("parse PORTITOR_CONFIG %s: %w", path, err)
-		}
+		return 1
 	}
-	if v := os.Getenv("PORTITOR_DEFAULT_BRANCH"); v != "" {
-		s.DefaultBranch = v
-	}
-	if v := os.Getenv("PORTITOR_ALLOWED_SIGNERS"); v != "" {
-		s.AllowedSigners = v
-	}
-	if v := os.Getenv("PORTITOR_UPSTREAM_REMOTE"); v != "" {
-		s.UpstreamRemote = v
-	}
-	if v := os.Getenv("PORTITOR_UPSTREAM_SLUG"); v != "" {
-		s.UpstreamSlug = v
-	}
-	return s, nil
+	fmt.Printf("validate-config: %s OK (%d role(s), %d rule(s))\n", *cfgPath, len(s.Roles), len(s.RoleRules))
+	return 0
 }
 
 func repoDir() string {
@@ -94,39 +94,6 @@ func repoDir() string {
 	return "."
 }
 
-// reposDir is the registry holding one <repo>.json per managed repo. init-repo
-// points each bare's hook config here too, so the gate and the action API read
-// the same per-repo config.
-func reposDir() string {
-	if d := os.Getenv("PORTITOR_REPOS_DIR"); d != "" {
-		return d
-	}
-	return "/etc/portitor/repos.d"
-}
-
-// reposRoot is where the bare repos live.
-func reposRoot() string {
-	if d := os.Getenv("PORTITOR_REPO_ROOT"); d != "" {
-		return d
-	}
-	return "/srv/git"
-}
-
-// resolveRepoConfig loads one repo's config (its roles + upstream slug + rules)
-// for the action API, so `portitor pr --repo X` acts on X with X's settings.
-func resolveRepoConfig(repo string) (settings, error) {
-	var s settings
-	path := filepath.Join(reposDir(), repo+".json")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return s, fmt.Errorf("read repo config %s: %w", path, err)
-	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		return s, fmt.Errorf("parse repo config %s: %w", path, err)
-	}
-	return s, nil
-}
-
 // preReceive runs the gate; exit 0 accepts the push, non-zero rejects it.
 func preReceive(r io.Reader, w io.Writer) int {
 	updates, err := parseUpdates(r)
@@ -134,7 +101,7 @@ func preReceive(r io.Reader, w io.Writer) int {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
-	s, err := loadSettings()
+	s, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
@@ -162,7 +129,7 @@ func postReceive(r io.Reader, w io.Writer) int {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
-	s, err := loadSettings()
+	s, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
@@ -214,11 +181,11 @@ func autoOpenPR(dir, def, ref string, gh action.GH) (int, string, error) {
 	} else if n > 0 {
 		return n, fmt.Sprintf("(existing PR #%d)", n), nil
 	}
-	title, err := gitOut(dir, "log", "-1", "--format=%s", branch)
+	title, err := git.Output(dir, "log", "-1", "--format=%s", branch)
 	if err != nil {
 		return 0, "", err
 	}
-	body, err := gitOut(dir, "log", "--reverse", "--format=%B", def+".."+branch)
+	body, err := git.Output(dir, "log", "--reverse", "--format=%B", def+".."+branch)
 	if err != nil {
 		return 0, "", err
 	}
@@ -226,20 +193,8 @@ func autoOpenPR(dir, def, ref string, gh action.GH) (int, string, error) {
 }
 
 // ---- pr action handler (role-validated) ----
-
-// roleCan reports whether a role may perform an action. owner is the human
-// override; merger is the dedicated, commit-less landing identity.
-func roleCan(role, act string) bool {
-	switch act {
-	case "fetch", "comment":
-		return role == "implementer" || role == "fixer" || role == "reviewer" || role == "merger" || role == "owner"
-	case "review":
-		return role == "reviewer" || role == "owner"
-	case "merge", "close":
-		return role == "merger" || role == "owner"
-	}
-	return false
-}
+// The role→action policy lives in internal/action (action.RoleCan), the single
+// source of truth shared with the README table.
 
 func prCommand(fp string, args []string) int {
 	if len(args) < 1 {
@@ -269,7 +224,7 @@ func prCommand(fp string, args []string) int {
 	// Per-repo config: the role map + upstream slug come from THIS repo's config,
 	// so one portitor mediates many repos. The role is re-derived from the signer
 	// fingerprint against that repo's roles (a credential, not a passed-in label).
-	s, err := resolveRepoConfig(*repo)
+	s, err := config.Resolve(*repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
 		return 1
@@ -279,7 +234,7 @@ func prCommand(fp string, args []string) int {
 		fmt.Fprintf(os.Stderr, "portitor pr: key has no role for repo %q\n", *repo)
 		return 1
 	}
-	if !roleCan(role, act) {
+	if !action.RoleCan(role, act) {
 		fmt.Fprintf(os.Stderr, "portitor pr: role %q may not %q\n", role, act)
 		return 1
 	}
@@ -469,17 +424,17 @@ func shellSplit(s string) ([]string, error) {
 
 // ghClient builds the action client for the configured upstream slug, deriving
 // it from the upstream remote URL if not set explicitly.
-func ghClient(s settings) action.GH {
+func ghClient(s config.Settings) action.GH {
 	slug := s.UpstreamSlug
 	if slug == "" {
-		if url, err := gitOut(repoDir(), "remote", "get-url", upstreamRemote(s)); err == nil {
+		if url, err := git.Output(repoDir(), "remote", "get-url", upstreamRemote(s)); err == nil {
 			slug = deriveSlug(strings.TrimSpace(url))
 		}
 	}
 	return action.GH{Repo: slug}
 }
 
-func upstreamRemote(s settings) string {
+func upstreamRemote(s config.Settings) string {
 	if s.UpstreamRemote != "" {
 		return s.UpstreamRemote
 	}
@@ -523,17 +478,17 @@ func initRepo(args []string) int {
 		cfg = filepath.Join(*bare, "portitor.json")
 	}
 
-	if err := runGit("", "init", "--bare", "--initial-branch="+*def, *bare); err != nil {
+	if err := git.Run("", "init", "--bare", "--initial-branch="+*def, *bare); err != nil {
 		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
 		return 1
 	}
 
 	if *upstream != "" {
-		_ = runGit(*bare, "remote", "add", "upstream", *upstream)
-		if err := runGit(*bare, "fetch", "upstream"); err != nil {
+		_ = git.Run(*bare, "remote", "add", "upstream", *upstream)
+		if err := git.Run(*bare, "fetch", "upstream"); err != nil {
 			fmt.Fprintf(os.Stderr, "init-repo: warning: fetch upstream: %v\n", err)
 		}
-		_ = runGit(*bare, "update-ref", "refs/heads/"+*def, "refs/remotes/upstream/"+*def)
+		_ = git.Run(*bare, "update-ref", "refs/heads/"+*def, "refs/remotes/upstream/"+*def)
 	}
 
 	for _, hook := range []string{"pre-receive", "post-receive"} {
@@ -565,12 +520,12 @@ func addRepo(args []string) int {
 		fmt.Fprintln(os.Stderr, "add-repo: --repo is required")
 		return 2
 	}
-	cfg := filepath.Join(reposDir(), *name+".json")
+	cfg := filepath.Join(config.ReposDir(), *name+".json")
 	if _, err := os.Stat(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "add-repo: place the repo config at %s first\n", cfg)
 		return 1
 	}
-	bare := filepath.Join(reposRoot(), *name+".git")
+	bare := filepath.Join(config.ReposRoot(), *name+".git")
 	return initRepo([]string{"--bare", bare, "--default", *def, "--upstream", *upstream, "--config", cfg})
 }
 
@@ -583,28 +538,8 @@ func upstreamNote(u string) string {
 
 // ---- git helpers ----
 
-func runGit(dir string, args ...string) error {
-	_, err := gitOut(dir, args...)
-	return err
-}
-
-func gitOut(dir string, args ...string) (string, error) {
-	a := args
-	if dir != "" {
-		a = append([]string{"-C", dir}, args...)
-	}
-	cmd := exec.Command("git", a...)
-	var out, errb strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
-	}
-	return out.String(), nil
-}
-
 func defaultBranchName(dir string) (string, error) {
-	out, err := gitOut(dir, "symbolic-ref", "--short", "HEAD")
+	out, err := git.Output(dir, "symbolic-ref", "--short", "HEAD")
 	return strings.TrimSpace(out), err
 }
 

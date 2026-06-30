@@ -5,27 +5,53 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/dmitriyb/portitor/internal/action"
 )
 
-func TestResolveRepoConfig(t *testing.T) {
+// Repo-name validation + config resolution moved to internal/config — tested there
+// (config_test.go: TestResolve, TestValidName, TestValidate).
+
+func TestValidateConfig(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("PORTITOR_REPOS_DIR", dir)
-	cfg := `{"upstream_slug":"o/r","roles":{"SHA256:abc":"implementer","SHA256:def":"reviewer"}}`
-	if err := os.WriteFile(filepath.Join(dir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+	signers := filepath.Join(dir, "allowed_signers")
+	if err := os.WriteFile(signers, []byte("principal ssh-ed25519 AAAA\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s, err := resolveRepoConfig("myrepo")
-	if err != nil {
-		t.Fatal(err)
+	write := func(body string) string {
+		p := filepath.Join(dir, "cfg.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
-	if s.UpstreamSlug != "o/r" {
-		t.Fatalf("slug = %q", s.UpstreamSlug)
+
+	ok := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"}}`)
+	if rc := validateConfig([]string{"--config", ok}); rc != 0 {
+		t.Fatalf("valid config: rc = %d, want 0", rc)
 	}
-	if s.Roles["SHA256:abc"] != "implementer" || s.Roles["SHA256:def"] != "reviewer" {
-		t.Fatalf("roles = %v", s.Roles)
+
+	// Missing required fields → non-zero.
+	badFields := write(`{"roles":{}}`)
+	if rc := validateConfig([]string{"--config", badFields}); rc == 0 {
+		t.Fatal("config with empty default_branch/allowed_signers/roles should fail")
 	}
-	if _, err := resolveRepoConfig("does-not-exist"); err == nil {
-		t.Fatal("expected error for a missing repo config")
+
+	// allowed_signers points at a non-existent file → non-zero.
+	badSigners := write(`{"default_branch":"main","allowed_signers":"/no/such/file","roles":{"SHA256:a":"reviewer"}}`)
+	if rc := validateConfig([]string{"--config", badSigners}); rc == 0 {
+		t.Fatal("config with unreadable allowed_signers should fail")
+	}
+
+	// Bad role-rule regex → non-zero.
+	badRegex := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"role_rules":[{"name":"r","added_regex":"(","allowed_roles":["reviewer"]}]}`)
+	if rc := validateConfig([]string{"--config", badRegex}); rc == 0 {
+		t.Fatal("config with a bad added_regex should fail")
+	}
+
+	// Missing path → exit 2.
+	if rc := validateConfig([]string{"--config", filepath.Join(dir, "nope.json")}); rc != 1 {
+		t.Fatalf("missing config file: rc = %d, want 1", rc)
 	}
 }
 
@@ -74,18 +100,18 @@ func TestRoleCan(t *testing.T) {
 	for act, allowed := range allow {
 		for _, role := range allRoles {
 			want := contains(allowed, role)
-			if got := roleCan(role, act); got != want {
-				t.Errorf("roleCan(%q,%q)=%v want %v", role, act, got, want)
+			if got := action.RoleCan(role, act); got != want {
+				t.Errorf("action.RoleCan(%q,%q)=%v want %v", role, act, got, want)
 			}
 		}
 	}
 	// implementer must NOT review/merge/close (the teeth of the model)
 	for _, act := range []string{"review", "merge", "close"} {
-		if roleCan("implementer", act) {
+		if action.RoleCan("implementer", act) {
 			t.Errorf("implementer should not be able to %q", act)
 		}
 	}
-	if roleCan("anything", "unknown-action") {
+	if action.RoleCan("anything", "unknown-action") {
 		t.Error("unknown action must be denied")
 	}
 }
