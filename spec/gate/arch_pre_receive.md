@@ -107,6 +107,10 @@ subcommand). The proxy ships as **its own container** (multi-stage `Dockerfile` 
 key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
 sshd under tini) — separate from the agent image, which holds no upstream credential.
 
+Once a repo is provisioned, `portitor add-role` fills in its role map re-runnably — binding a signer
+fingerprint to a role (and optionally trusting a signing role's public key in `allowed_signers`)
+without re-provisioning. See `arch_add_role.md`.
+
 ## Boundaries
 
 The gate is generic: it knows nothing of beads/spex; domain rules (role rules, the role map) are

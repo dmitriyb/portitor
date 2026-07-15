@@ -41,6 +41,8 @@ func main() {
 		os.Exit(shellCommand(os.Args[2:]))
 	case "add-repo":
 		os.Exit(addRepo(os.Args[2:]))
+	case "add-role":
+		os.Exit(addRole(os.Args[2:]))
 	case "validate-config":
 		os.Exit(validateConfig(os.Args[2:]))
 	case "pr":
@@ -53,7 +55,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|validate-config|shell|pr>")
+	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|add-role|validate-config|shell|pr>")
 }
 
 // validateConfig checks a repo config up front (at container boot / by an operator)
