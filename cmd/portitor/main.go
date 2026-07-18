@@ -43,6 +43,10 @@ func main() {
 		os.Exit(shellCommand(os.Args[2:]))
 	case "add-repo":
 		os.Exit(addRepo(os.Args[2:]))
+	case "upgrade-repo":
+		os.Exit(upgradeRepo(os.Args[2:]))
+	case "reconcile":
+		os.Exit(reconcile(os.Args[2:]))
 	case "add-role":
 		os.Exit(addRole(os.Args[2:]))
 	case "validate-config":
@@ -61,7 +65,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|add-role|validate-config|shell|pr>")
+	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|upgrade-repo|reconcile|add-role|validate-config|shell|pr>")
 }
 
 // validateConfig checks a repo config up front (at container boot / by an operator)
@@ -201,13 +205,19 @@ func repoName() string {
 // postReceive forwards accepted feature refs upstream, then auto-opens a PR for
 // each (idempotent) and prints the receipt.
 func postReceive(r io.Reader, w io.Writer) int {
-	updates, err := parseUpdates(r)
+	// Config first so a malformed-stdin rejection is auditable (parity with
+	// preReceive); a config that cannot load is the one unauditable failure.
+	s, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
-	s, err := config.Load()
+	updates, err := parseUpdates(r)
 	if err != nil {
+		if aerr := audit.Append(s.AuditLog, audit.Event{Kind: "forward", Repo: repoName(),
+			Fingerprint: os.Getenv("PORTITOR_FINGERPRINT"), Verdict: "error", Reason: err.Error()}); aerr != nil {
+			fmt.Fprintf(w, "portitor: audit: %v\n", aerr)
+		}
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
@@ -232,27 +242,99 @@ func postReceive(r io.Reader, w io.Writer) int {
 	rc := 0
 	gh := ghClient(s)
 	for _, res := range results {
-		if res.Err != nil {
-			fmt.Fprintf(w, "portitor: forward %s -> upstream FAILED: %v\n", res.Ref, res.Err)
+		switch res.Status {
+		case gate.StatusForwarded, gate.StatusAlreadyUpstream:
+			if res.Status == gate.StatusAlreadyUpstream {
+				fmt.Fprintf(w, "portitor: %s already on upstream (out-of-order forward)\n", res.Ref)
+			} else {
+				fmt.Fprintf(w, "portitor: forwarded %s -> upstream\n", res.Ref)
+			}
+			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "allow", Reason: string(res.Status)})
+			n, url, err := autoOpenPR(repoDir(), def, res.Ref, gh)
+			ev := audit.Event{Kind: "auto-pr", Refs: []string{res.Ref}, PR: n}
+			if err != nil {
+				fmt.Fprintf(w, "portitor: PR for %s: %v\n", res.Ref, err)
+				ev.Verdict = "error"
+				ev.Reason = err.Error()
+			} else {
+				if n > 0 {
+					fmt.Fprintf(w, "portitor: PR #%d %s\n", n, url)
+				}
+				ev.Verdict = "allow"
+			}
+			auditEvent(w, ev)
+		case gate.StatusFailed:
+			fmt.Fprintf(w, "portitor: forward %s -> upstream FAILED: %v (recover with: portitor reconcile --repo <name>)\n", res.Ref, res.Err)
 			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "error", Reason: res.Err.Error()})
 			rc = 1
-			continue
+		default: // skipped-default / skipped-non-branch / skipped-deletion
+			fmt.Fprintf(w, "portitor: %s not forwarded (%s)\n", res.Ref, res.Status)
+			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: string(res.Status)})
 		}
-		fmt.Fprintf(w, "portitor: forwarded %s -> upstream\n", res.Ref)
-		auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "allow"})
-		n, url, err := autoOpenPR(repoDir(), def, res.Ref, gh)
-		ev := audit.Event{Kind: "auto-pr", Refs: []string{res.Ref}, PR: n}
-		if err != nil {
-			fmt.Fprintf(w, "portitor: PR for %s: %v\n", res.Ref, err)
-			ev.Verdict = "error"
-			ev.Reason = err.Error()
-		} else {
-			if n > 0 {
-				fmt.Fprintf(w, "portitor: PR #%d %s\n", n, url)
+	}
+	return rc
+}
+
+// reconcile re-forwards a repo's accepted feature branches that never reached
+// upstream (an upstream-forward failure cannot be re-triggered by a re-push,
+// since pre-receive accepts an already-present tip with zero new commits). It
+// is idempotent — a branch already upstream is a no-op — and re-attempts the
+// auto-open PR for each reconciled branch.
+func reconcile(args []string) int {
+	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
+	repo := fs.String("repo", "", "repository name (selects the per-repo config)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *repo == "" {
+		fmt.Fprintln(os.Stderr, "reconcile: --repo <name> required")
+		return 2
+	}
+	s, err := config.Resolve(*repo)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: %v\n", err)
+		return 1
+	}
+	bare := filepath.Join(config.ReposRoot(), *repo+".git")
+	def := s.DefaultBranch
+	auditEvent := func(e audit.Event) {
+		e.Repo = *repo
+		if aerr := audit.Append(s.AuditLog, e); aerr != nil {
+			fmt.Fprintf(os.Stderr, "reconcile: audit: %v\n", aerr)
+		}
+	}
+	results, err := gate.Reconcile(bare, gate.ForwardConfig{UpstreamRemote: s.UpstreamRemote, DefaultBranch: def})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: %v\n", err)
+		return 1
+	}
+	gh := ghClientFor(bare, s)
+	rc := 0
+	for _, res := range results {
+		switch res.Status {
+		case gate.StatusForwarded:
+			fmt.Printf("reconcile: forwarded %s -> upstream\n", res.Ref)
+			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "allow", Reason: "reconcile"})
+			n, url, err := autoOpenPR(bare, def, res.Ref, gh)
+			ev := audit.Event{Kind: "auto-pr", Refs: []string{res.Ref}, PR: n}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "reconcile: PR for %s: %v\n", res.Ref, err)
+				ev.Verdict, ev.Reason = "error", err.Error()
+			} else {
+				if n > 0 {
+					fmt.Printf("reconcile: PR #%d %s\n", n, url)
+				}
+				ev.Verdict = "allow"
 			}
-			ev.Verdict = "allow"
+			auditEvent(ev)
+		case gate.StatusAlreadyUpstream:
+			fmt.Printf("reconcile: %s already upstream\n", res.Ref)
+			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: "already-upstream"})
+		case gate.StatusFailed:
+			fmt.Fprintf(os.Stderr, "reconcile: %s FAILED: %v\n", res.Ref, res.Err)
+			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "error", Reason: res.Err.Error()})
+			rc = 1
 		}
-		auditEvent(w, ev)
 	}
 	return rc
 }
@@ -606,16 +688,49 @@ func shellSplit(s string) ([]string, error) {
 // ghClient builds the action client for the configured upstream slug, deriving
 // it from the upstream remote URL if not set explicitly.
 func ghClient(s config.Settings) action.GH {
+	return ghClientFor(repoDir(), s)
+}
+
+// ghClientFor builds the action client for a specific repo dir, deriving the
+// slug from the upstream remote URL when not set explicitly. A derived slug is
+// validated (owner/name shape) — a malformed value must never reach `gh -R`.
+func ghClientFor(dir string, s config.Settings) action.GH {
 	slug := s.UpstreamSlug
 	if slug == "" {
 		remote := upstreamRemote(s)
 		if git.ValidRemoteName(remote) {
-			if url, err := git.Output(repoDir(), "remote", "get-url", remote); err == nil {
+			if url, err := git.Output(dir, "remote", "get-url", remote); err == nil {
 				slug = deriveSlug(strings.TrimSpace(url))
 			}
 		}
 	}
+	if slug != "" && !validSlug(slug) {
+		slug = "" // an unusable slug is no slug — callers already handle Repo=="".
+	}
 	return action.GH{Repo: slug}
+}
+
+// validSlug reports whether s is a well-formed owner/name GitHub slug: exactly
+// two non-empty path segments of safe characters, no leading '-'.
+func validSlug(s string) bool {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || strings.HasPrefix(p, "-") {
+			return false
+		}
+		for _, r := range p {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+				r == '_', r == '-', r == '.':
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func upstreamRemote(s config.Settings) string {
@@ -626,6 +741,8 @@ func upstreamRemote(s config.Settings) string {
 }
 
 // deriveSlug extracts owner/name from a github remote URL (ssh or https forms).
+// It returns "" for anything that does not yield a well-formed owner/name slug,
+// so a malformed remote URL can never reach `gh -R` as a bogus target.
 func deriveSlug(url string) string {
 	url = strings.TrimSuffix(url, ".git")
 	if i := strings.Index(url, "://"); i >= 0 {
@@ -636,10 +753,14 @@ func deriveSlug(url string) string {
 		url = url[i+1:]
 	}
 	parts := strings.Split(url, "/")
-	if len(parts) >= 2 {
-		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	if len(parts) < 2 {
+		return ""
 	}
-	return ""
+	slug := parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	if !validSlug(slug) {
+		return ""
+	}
+	return slug
 }
 
 // ---- init-repo ----
@@ -676,24 +797,116 @@ func initRepo(args []string) int {
 	}
 
 	if *upstream != "" {
-		_ = git.Run(*bare, "remote", "add", "upstream", *upstream)
-		if err := git.Run(*bare, "fetch", "upstream"); err != nil {
-			fmt.Fprintf(os.Stderr, "init-repo: warning: fetch upstream: %v\n", err)
-		}
-		_ = git.Run(*bare, "update-ref", "refs/heads/"+*def, "refs/remotes/upstream/"+*def)
-	}
-
-	for _, hook := range []string{"pre-receive", "post-receive"} {
-		shim := fmt.Sprintf("#!/bin/sh\nexport PORTITOR_CONFIG=%s\nexec \"${PORTITOR_BIN:-portitor}\" %s\n", shellQuote(cfg), hook)
-		p := filepath.Join(*bare, "hooks", hook)
-		if err := os.WriteFile(p, []byte(shim), 0o755); err != nil {
-			fmt.Fprintf(os.Stderr, "init-repo: write %s: %v\n", hook, err)
+		// Provisioning must fail loudly, not bake an unverified repo: a
+		// swallowed remote-add / seed error leaves a gate that cannot forward.
+		if err := git.Run(*bare, "remote", "add", "upstream", *upstream); err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: add upstream remote: %v\n", err)
 			return 1
 		}
+		if err := git.OutputNetworkRun(*bare, "fetch", "upstream"); err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: fetch upstream: %v\n", err)
+			return 1
+		}
+		// Seed the default branch from upstream only if upstream has it (a fresh
+		// empty upstream legitimately does not).
+		hasDefault, err := refExists(*bare, "refs/remotes/upstream/"+*def)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: check upstream default branch: %v\n", err)
+			return 1
+		}
+		if hasDefault {
+			if err := git.Run(*bare, "update-ref", "refs/heads/"+*def, "refs/remotes/upstream/"+*def); err != nil {
+				fmt.Fprintf(os.Stderr, "init-repo: seed default branch: %v\n", err)
+				return 1
+			}
+		}
+	}
+
+	if err := bakeHooks(*bare, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
+		return 1
+	}
+
+	// Never bake a KNOWN-BAD config silently: if the config is present, it must
+	// load and validate (else the gate would reject every later push with no
+	// cause surfaced here). An absent config is a loud warning, not an error —
+	// a bootstrap may place it next — but the gate will not work until it does.
+	if _, err := os.Stat(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: warning: config %s is not present yet — place it (add-role/add-repo) before pushing; the gate will reject until then\n", cfg)
+	} else if s, err := config.LoadFile(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: config %s: %v\n", cfg, err)
+		return 1
+	} else if problems := config.Validate(s); len(problems) > 0 {
+		fmt.Fprintf(os.Stderr, "init-repo: config %s is invalid:\n", cfg)
+		for _, p := range problems {
+			fmt.Fprintf(os.Stderr, "  - %s\n", p)
+		}
+		return 1
 	}
 
 	fmt.Printf("portitor: initialized bare repo %s (default=%s, config=%s%s)\n",
 		*bare, *def, cfg, upstreamNote(*upstream))
+	return 0
+}
+
+// hookShimVersion stamps the baked hook shims. It is a frozen compatibility
+// surface: bumped only when the shim contract (env vars, subcommand names) or
+// the frozen subcommand names change, so upgrade-repo can detect a stale bake.
+const hookShimVersion = 1
+
+// hookMarker prefixes the version line every baked shim carries.
+const hookMarker = "# portitor-hook-version: "
+
+// bakeHooks writes the pre-receive/post-receive shims atomically (a partial
+// write must never leave an executable stub that exits 0 and accepts every
+// push). Each shim carries a version marker for upgrade-repo.
+func bakeHooks(bare, cfg string) error {
+	hooksDir := filepath.Join(bare, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return fmt.Errorf("hooks dir: %w", err)
+	}
+	for _, hook := range []string{"pre-receive", "post-receive"} {
+		// PORTITOR_BIN lets the container image point the shim at an absolute
+		// binary path (deploy/entrypoint.sh); it is env-controlled but safe —
+		// sshd does not forward client env by default (no AcceptEnv), so a
+		// pushing agent cannot set it.
+		shim := fmt.Sprintf("#!/bin/sh\n%s%d\nexport PORTITOR_CONFIG=%s\nexec \"${PORTITOR_BIN:-portitor}\" %s\n",
+			hookMarker, hookShimVersion, shellQuote(cfg), hook)
+		if err := atomicWrite(filepath.Join(hooksDir, hook), []byte(shim), 0o755); err != nil {
+			return fmt.Errorf("write %s hook: %w", hook, err)
+		}
+	}
+	return nil
+}
+
+// upgradeRepo re-bakes a provisioned repo's hook shims to the current version
+// (idempotent), preserving the config path already baked in. It is the
+// re-provisioning path when the CLI's shim contract evolves.
+func upgradeRepo(args []string) int {
+	fs := flag.NewFlagSet("upgrade-repo", flag.ContinueOnError)
+	repo := fs.String("repo", "", "repository name (uses the registry paths)")
+	bareFlag := fs.String("bare", "", "explicit bare repo path (overrides --repo)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	bare := *bareFlag
+	if bare == "" {
+		if !config.ValidName(*repo) {
+			fmt.Fprintln(os.Stderr, "upgrade-repo: --repo <name> or --bare <path> required")
+			return 2
+		}
+		bare = filepath.Join(config.ReposRoot(), *repo+".git")
+	}
+	cfg, ok := bakedHookConfig(bare)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "upgrade-repo: %s has no baked pre-receive hook to read the config path from; re-run init-repo\n", bare)
+		return 1
+	}
+	if err := bakeHooks(bare, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "upgrade-repo: %v\n", err)
+		return 1
+	}
+	fmt.Printf("upgrade-repo: re-baked hooks for %s (version %d, config=%s)\n", bare, hookShimVersion, cfg)
 	return 0
 }
 
@@ -733,6 +946,21 @@ func upstreamNote(u string) string {
 func defaultBranchName(dir string) (string, error) {
 	out, err := git.Output(dir, "symbolic-ref", "--short", "HEAD")
 	return strings.TrimSpace(out), err
+}
+
+// refExists reports whether ref resolves to a commit in the repo. Exit status 1
+// means "absent"; any other failure (e.g. a timeout) is a real error — it must
+// not silently read as "absent" and skip seeding.
+func refExists(dir, ref string) (bool, error) {
+	_, err := git.Output(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, err
 }
 
 func shellQuote(s string) string {

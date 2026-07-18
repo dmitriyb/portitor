@@ -35,6 +35,8 @@ per-role rules. A container holding only one role's key cannot act as another ro
 | `portitor pre-receive` / `post-receive` | the bare repo's git hooks | the gate / forward + auto-PR |
 | `portitor init-repo --bare … --config … --upstream …` | operator | create a gated bare repo + mirror |
 | `portitor add-repo --repo <name> --upstream <url>` | operator | init-repo using the registry conventions |
+| `portitor upgrade-repo --repo <name>` | operator | re-bake a repo's hook shims to the current version |
+| `portitor reconcile --repo <name>` | operator | re-forward accepted branches upstream after a forward failure |
 | `portitor shell <fingerprint>` | sshd forced command | dispatch a connection to git-pack or the `pr` API |
 | `portitor pr <action> --repo <name> --pr <n>` | the agent (via SSH) | one role-validated GitHub action |
 | `portitor validate-config [--config <path>]` | operator / entrypoint | fail fast if a repo config is missing/malformed (run at container boot) |

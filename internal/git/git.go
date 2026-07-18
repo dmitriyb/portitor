@@ -37,6 +37,13 @@ func OutputNetwork(dir string, args ...string) (string, error) {
 	return run(dir, NetworkTimeout, false, args...)
 }
 
+// OutputNetworkRun is OutputNetwork with stdout discarded — for network git
+// commands run only for their effect (fetch).
+func OutputNetworkRun(dir string, args ...string) error {
+	_, err := run(dir, NetworkTimeout, false, args...)
+	return err
+}
+
 // OutputHermetic is Output with the global and system git config masked
 // (GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM=/dev/null) — for the gate's
 // fact-gathering calls, whose verdict must be a function of the push, the repo,

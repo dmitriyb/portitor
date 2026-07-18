@@ -154,8 +154,31 @@ forwarder independently skips them as defense in depth). The remote name is vali
 (non-empty, no leading `-`, no whitespace/control bytes) so a malformed configured value can never
 be read as a git option, and the refspec is built only from a validated 40-hex SHA and a
 `refs/heads/`-prefixed ref. The default branch is never forwarded (it is PR/owner territory and
-`pre-receive` rejects pushes to it). Each ref's outcome is reported; a failed forward yields a
-non-zero exit.
+`pre-receive` rejects pushes to it).
+
+**Every update yields a reported outcome — nothing is silently dropped.** Each result carries a
+status:
+
+- `forwarded` — pushed to upstream.
+- `already-upstream` — the push was rejected but the upstream branch already **contains** the new
+  tip (a later, containing push forwarded first — out-of-order forwarding). This is **success**:
+  the content the update carried is upstream. Containment is proven locally (the remote tip is an
+  ancestor-or-equal of the new tip, using the remote tip object that a received push left in the
+  repo); if it cannot be proven, the failure stands (fail-closed).
+- `skipped-default` — the ref is (now) the default branch. Reported explicitly so a default-branch
+  change **between** pre- and post-receive cannot silently drop an accepted ref (the earlier
+  fail-open where Forward exited 0 with no output).
+- `skipped-non-branch` / `skipped-deletion` — a non-`refs/heads` ref or a deletion.
+- `failed` — the push failed and upstream does not contain the tip; post-receive exits non-zero
+  and points the operator at `portitor reconcile`.
+
+## Recovery (`reconcile`)
+
+An upstream-forward failure cannot be recovered by a re-push: pre-receive accepts an already-present
+tip with zero new commits, so post-receive's forward never re-fires. `portitor reconcile --repo <name>`
+re-forwards every local non-default branch that upstream does not already contain (idempotent — a
+branch already upstream is a no-op) and re-attempts the auto-open PR for each. It reads the same
+per-repo config and uses the same ancestor-aware forward.
 
 ## Provisioning (`init-repo`) and deployment
 
@@ -165,7 +188,20 @@ from it (so agents clone the default from the proxy with no upstream credential)
 `pre-receive`/`post-receive` hook shims (each exports `PORTITOR_CONFIG` and execs the matching
 subcommand). Without `--config` the path defaults to the **registry** —
 `<ReposDir>/<name>.json`, the single canonical per-repo config identity every consumer reads
-(see `arch_config.md`). The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
+(see `arch_config.md`).
+
+Provisioning is fail-loud, not best-effort: a remote-add / fetch / seed error aborts (never bakes a
+gate that cannot forward); the default branch is seeded only when upstream actually has it. The hook
+shims are written **atomically** (temp-then-rename) so a partial write can never leave an executable
+stub that exits 0 and accepts every push, and each shim carries a **version marker**
+(`# portitor-hook-version: N`) — a frozen compatibility surface. If the baked config is present it
+must load and validate here (a known-bad config fails at provisioning, not silently at every later
+push); an absent config is a loud warning (a bootstrap may place it next).
+
+`portitor upgrade-repo --repo <name>` (or `--bare <path>`) re-bakes the hook shims to the current
+version idempotently, reading the config path from the existing shim — the re-provisioning path
+when the CLI's shim contract evolves. The hook subcommand names (`pre-receive`, `post-receive`) are
+a frozen compatibility surface: renaming one would strand every already-provisioned repo. The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
 key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
 sshd under tini) — separate from the agent image, which holds no upstream credential.
 
