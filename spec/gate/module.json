@@ -39,6 +39,11 @@
     },
     {
       "type": "functional",
+      "title": "Register a fingerprint->role in an existing repo config (add-role)",
+      "description": "`portitor add-role --repo <name> --role <role> --fingerprint SHA256:... [--pub <file>]` is a re-runnable init step that edits an already-provisioned repos.d/<name>.json (config.ReposDir(), PORTITOR_REPOS_DIR-aware; ValidName-guarded so it stays inside the registry dir). It validates the fingerprint syntax + role name, sets Roles[fingerprint]=role (add, or overwrite a different mapping; identical binding is an idempotent no-op) while preserving every other config field, and — when --pub names the matching public key AND the role is a signing role — appends its `<role> namespaces=\"git\" <keytype> <keydata>` line to the config's allowed_signers file (fingerprint-checked against the pub via ssh-keygen -lf, deduped; the file is created at mode 0644 if it does not yet exist). Signing-vs-identity classification is a closed denylist: identity-only roles are exactly {merger} and every other role name is a signing role. An identity-only role (merger) passed with --pub is refused, since its key must never gain commit-signing trust; likewise an overwrite that re-binds a fingerprint already present in allowed_signers to merger is refused. The config is written atomically (temp file + rename) and re-validated with config.Validate after the write; a missing config, a present-but-invalid --repo (ValidName failure, exit 2 usage error), an unreadable/malformed --pub file or ssh-keygen failure, a fingerprint/pub mismatch, or a validation problem fails the command loudly and leaves the config untouched. It never writes private key material."
+    },
+    {
+      "type": "functional",
       "title": "Reject the whole push atomically with all violations",
       "description": "pre-receive runs once per push over git's object quarantine. portitor collects every violation across all refs/commits and, if any exist, exits non-zero printing a complete, actionable report to stderr (surfaced to the pusher as remote: lines); exits 0 only when there are zero violations."
     },
@@ -82,6 +87,12 @@
       "name": "InitRepoCommand",
       "description": "The `portitor init-repo` subcommand: creates the gated bare repo, optionally mirrors/seeds from upstream, and installs the pre-receive/post-receive hook shims wired to PORTITOR_CONFIG.",
       "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "AddRoleCommand",
+      "description": "The `portitor add-role` subcommand: loads repos.d/<name>.json (config.ReposDir(), PORTITOR_REPOS_DIR-aware), upserts the fingerprint->role binding in Roles, optionally appends a signing role's --pub key to allowed_signers (fingerprint-checked with ssh-keygen -lf, deduped), writes the config atomically (temp file + rename, mode preserved), and runs config.Validate afterwards. Malformed fingerprint/role, a missing config, a pub/fingerprint mismatch, or --pub for an identity-only role are loud errors; an identical re-run is an idempotent no-op.",
+      "content": "arch_add_role.md",
       "implements": []
     },
     {
