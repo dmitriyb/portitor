@@ -57,6 +57,9 @@ func main() {
 		// Not part of the CLI surface: the rlimit trampoline internal/check
 		// re-execs through. The SSH shell dispatcher cannot route here.
 		os.Exit(internalCheckExec(os.Args[2:]))
+	case "-h", "--help", "help":
+		usageTo(os.Stdout)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "portitor: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -64,8 +67,31 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portitor <pre-receive|post-receive|init-repo|add-repo|upgrade-repo|reconcile|add-role|validate-config|shell|pr>")
+func usage() { usageTo(os.Stderr) }
+
+func usageTo(w io.Writer) {
+	fmt.Fprint(w, `portitor — a git gateway that verifies the result of a push and mediates GitHub actions.
+
+usage: portitor <command> [flags]
+
+gate (git hooks):
+  pre-receive             run the gate over an incoming push (accept/reject)
+  post-receive            forward accepted feature branches upstream + auto-open PRs
+
+provisioning (operator):
+  init-repo   --bare <path> [--default <b>] [--upstream <url>] [--config <json>]
+  add-repo    --repo <name> [--default <b>] [--upstream <url>]
+  upgrade-repo --repo <name> | --bare <path>    re-bake hook shims to the current version
+  add-role    --repo <name> --role <role> --fingerprint SHA256:… [--pub <file>]
+  reconcile   --repo <name>    re-forward accepted branches after a forward failure
+  validate-config [--config <path>]    fail fast on a missing/invalid config
+
+action channel (over SSH):
+  shell <fingerprint>     forced command: dispatch to git-pack or the pr API
+  pr <comment|review|merge|close|fetch> --repo <name> --pr <n> [--event …]
+
+See README.md and spec/ for the full model.
+`)
 }
 
 // validateConfig checks a repo config up front (at container boot / by an operator)

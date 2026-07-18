@@ -209,10 +209,18 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 				return nil, err
 			}
 			if status != "G" {
+				// Surface the offending key's fingerprint when git reported one
+				// (a "U" verdict — good signature, signer not in allowed_signers):
+				// it is exactly what the operator adds to allowed_signers or the
+				// roles map to fix the rejection.
+				detail := fmt.Sprintf("commit %s is not signed by an allowed signer (%s)", shortSHA(c), sigReason(status))
+				if fp != "" {
+					detail += fmt.Sprintf("; signer fingerprint %s", fp)
+				}
 				vs = append(vs, Violation{
 					Ref:    u.Ref,
 					Rule:   "unsigned-or-untrusted-commit",
-					Detail: fmt.Sprintf("commit %s is not signed by an allowed signer (%s)", shortSHA(c), sigReason(status)),
+					Detail: detail,
 				})
 				continue // an untrusted signer's role can't be trusted; skip role rules
 			}

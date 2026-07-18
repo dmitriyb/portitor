@@ -46,12 +46,20 @@ without the reviewer key), that verdicts come from extracted record deltas and n
 
 ## End-to-end (real push)
 
-Beyond the unit tests, the `portitor` binary is installed as an actual `pre-receive` hook on a bare
-repo and exercised with `git push`:
+Beyond the unit tests, `TestEndToEndRealPush` (`cmd/portitor/e2e_test.go`) builds the `portitor`
+binary and installs it as an actual `pre-receive` hook on a bare repo, then drives it with real
+`git push`:
 
-- signed feature → `[new branch]` accepted;
-- push to `main` → `pre-receive hook declined`, with `remote: … [no-push-to-default] …`;
+- push to `main` → declined, with `remote: … [no-push-to-default] …`;
+- signed feature → accepted;
 - unsigned feature → declined, with `remote: … [unsigned-or-untrusted-commit] …`.
 
-This confirms stdin parsing, `GIT_DIR` handling, exit-code → push rejection, and that the rejection
-reasons surface to the pusher.
+This confirms stdin parsing, `GIT_DIR`/`PORTITOR_CONFIG` handling through the hook shim, the
+exit-code → push-rejection mapping, and that the rejection reasons surface to the pusher as
+`remote:` lines. It is skipped under `go test -short` (it compiles the binary).
+
+## Rejection message carries the fingerprint
+
+An `unsigned-or-untrusted-commit` violation for a commit git reports as `U` (good signature,
+signer not in `allowed_signers`) includes the signer's `%GF` fingerprint in the detail — exactly
+the value the operator adds to `allowed_signers` or the `roles` map to resolve the rejection.

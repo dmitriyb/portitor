@@ -175,6 +175,27 @@ a landing-only credential that can also sign commits collapses the role isolatio
 so `add-role` refuses to trust such keys and refuses to rebind an already-trusted
 key to an identity-only role.
 
+### Registering roles with `add-role` (don't hand-edit the roles map)
+
+Prefer `portitor add-role` over editing the `roles` map by hand: it validates the
+fingerprint shape, upserts the binding atomically, optionally trusts a signing
+role's public key in `allowed_signers` (fingerprint-checked, deduped), re-validates
+the whole config, and serializes concurrent runs under a lock — so a fat-fingered
+key or a half-written file can't quietly weaken the gate.
+
+```bash
+# Bind a signing role and trust its key for commit signatures in one step:
+portitor add-role --repo myrepo --role implementer \
+  --fingerprint SHA256:aaaa… --pub ./implementer.pub
+
+# Bind the landing identity (identity-only: NO --pub, never trusted to sign):
+portitor add-role --repo myrepo --role merger --fingerprint SHA256:cccc…
+```
+
+It edits the registry file (`<repos.d>/<name>.json`) and warns if the repo's baked
+hook reads a different config. Re-running with the same arguments is an idempotent
+no-op. See `spec/gate/arch_add_role.md` for the full contract.
+
 ### Roles
 
 Roles are arbitrary strings you choose; portitor ships **no role names**. The

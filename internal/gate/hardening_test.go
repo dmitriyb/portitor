@@ -3,6 +3,7 @@ package gate
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,38 @@ func TestPoisonedGlobalConfig(t *testing.T) {
 		}
 		assertRules(t, vs, []string{"unsigned-or-untrusted-commit"})
 	})
+}
+
+// TestUntrustedSignerFingerprintInMessage (L-P3c): a commit signed by a key not
+// in allowed_signers (git verdict "U") is rejected with the signer's fingerprint
+// in the detail — the value the operator needs to fix the grant.
+func TestUntrustedSignerFingerprintInMessage(t *testing.T) {
+	requireBins(t, "git", "ssh-keygen")
+	e := newTestEnv(t)
+
+	base := e.commitFile("README.md", "base")
+	e.push("main")
+
+	wrongKey := filepath.Join(e.dir, "wrong_ed25519")
+	genKey(t, wrongKey, "evil@example.com")
+	e.checkout("-b", "feat-wrongkey")
+	e.signWith(wrongKey)
+	featWrong := e.commitFile("c.txt", "c")
+	e.signWith(e.goodKey)
+	e.push("feat-wrongkey")
+
+	wantFP := fingerprint(t, wrongKey+".pub")
+	cfg := Config{AllowedSigners: e.allowedSigners}
+	vs, err := Check(e.bare, []RefUpdate{{OldSHA: base, NewSHA: featWrong, Ref: "refs/heads/feat-wrongkey"}}, cfg)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(vs) != 1 || vs[0].Rule != "unsigned-or-untrusted-commit" {
+		t.Fatalf("violations = %+v", vs)
+	}
+	if !strings.Contains(vs[0].Detail, wantFP) {
+		t.Fatalf("detail should carry the signer fingerprint %s: %q", wantFP, vs[0].Detail)
+	}
 }
 
 // TestRefUpdateValidate covers the hook-stdin shape check (fail-closed parsing).
