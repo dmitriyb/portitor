@@ -8,11 +8,15 @@
 #   AGENT_AUTHORIZED_KEY one or more agent/role PUBLIC keys (one per line). Each is
 #                        installed with a forced command so the key can ONLY do
 #                        gated git + the role-checked `portitor pr` API.
-#   PORTITOR_CONFIG      in-container path to the per-repo portitor config the
-#                        `portitor shell` dispatcher loads (role map etc.).
+#   PORTITOR_CONFIG      optional legacy fallback config path. The canonical
+#                        per-repo config identity is the registry
+#                        (/etc/portitor/repos.d/<repo>.json): the gate hooks
+#                        bake it at provisioning, and `portitor pr` resolves it
+#                        by --repo. Set this only for a legacy single-config
+#                        layout.
 #
-# Repos are provisioned out of band with `portitor init-repo` and live on the
-# /srv/git volume.
+# Repos are provisioned out of band with `portitor add-repo` (or init-repo) and
+# live on the /srv/git volume.
 set -eu
 
 PORTITOR_CONFIG="${PORTITOR_CONFIG:-/srv/git/portitor.json}"

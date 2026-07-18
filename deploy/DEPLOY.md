@@ -10,7 +10,7 @@ Contents+PR RW on the sandbox), and the dca scripts on PATH (from dot).
 ## 1. Role keys + portitor config (one-time, ~/.dca-keys)
 
 ```bash
-mkdir -p ~/.dca-keys/portitor-config && cd ~/.dca-keys
+mkdir -p ~/.dca-keys/portitor-config/repos.d && cd ~/.dca-keys
 for r in implementer reviewer merger; do ssh-keygen -t ed25519 -N "" -C "dca-$r" -f "$r"; done
 
 # allowed_signers (gate verifies commit signatures against this)
@@ -18,7 +18,9 @@ for r in implementer reviewer merger; do
   printf 'dca-%s namespaces="git" %s\n' "$r" "$(awk '{print $1,$2}' "$r.pub")"
 done > portitor-config/allowed_signers
 
-# portitor.json — DEPLOY POLICY (this file, not portitor, knows the domain).
+# repos.d/dca-sandbox.json — DEPLOY POLICY (this file, not portitor, knows the domain).
+# The registry (repos.d/<name>.json) is the single canonical config identity: the
+# gate hooks, add-role, and the pr API all read this same file.
 # portitor's content_rules are generic mechanism: the semantic check command
 # below is *this deployment's* record extractor (br, the beads CLI, pinned by
 # the toolset overlay); portitor itself ships no knowledge of it.
@@ -29,6 +31,7 @@ i=$(ssh-keygen -lf implementer.pub|awk '{print $2}')
 v=$(ssh-keygen -lf reviewer.pub|awk '{print $2}')
 m=$(ssh-keygen -lf merger.pub|awk '{print $2}')
 jq -n --arg i "$i" --arg v "$v" --arg m "$m" '{
+  format_version: 1,
   default_branch:"main", allowed_signers:"/etc/portitor/allowed_signers", upstream_remote:"upstream",
   upstream_slug:"dmitriyb/dca-sandbox",
   roles: {($i):"implementer", ($v):"reviewer", ($m):"merger"},
@@ -52,7 +55,7 @@ jq -n --arg i "$i" --arg v "$v" --arg m "$m" '{
         roles:{not_in:["reviewer","owner"]}, effect:"deny"}],
       default:"allow"}]}
   }
-}' > portitor-config/portitor.json
+}' > portitor-config/repos.d/dca-sandbox.json
 ```
 
 ## 2. Build the portitor image + deploy
@@ -73,9 +76,10 @@ docker network connect dca-net portitor           # portitor on bridge (GitHub) 
 ```bash
 # Run as the git user: gh's credential helper (for the https fetch) is configured
 # for git, not root (docker exec defaults to root).
-docker exec -u git portitor portitor init-repo --bare /srv/git/dca-sandbox.git \
-  --upstream https://github.com/dmitriyb/dca-sandbox.git \
-  --config /etc/portitor/portitor.json
+# add-repo uses the registry conventions: bare at /srv/git/dca-sandbox.git,
+# config at /etc/portitor/repos.d/dca-sandbox.json (placed there in step 1).
+docker exec -u git portitor portitor add-repo --repo dca-sandbox \
+  --upstream https://github.com/dmitriyb/dca-sandbox.git
 ```
 
 ## 4. Live run
@@ -94,7 +98,7 @@ pushes → gate accepts → forward to `dca-sandbox` → **auto-PR**. Check the 
 - The agent's `PORTITOR_HOST` defaults to `portitor` (the container name on
   `dca-net`); `known_hosts` is `accept-new` for the sandbox.
 - The role key in `~/.dca-keys/implementer` must be the same key whose pubkey is
-  in `portitor.json` + `authorized_keys` — they're generated together above.
+  in `repos.d/dca-sandbox.json` + `authorized_keys` — they're generated together above.
 - This spends Anthropic budget (a real `claude` run) and opens a real PR. Reset
   between runs: close the PR, delete the agent branch, `git checkout` the beads
   jsonl in the sandbox.

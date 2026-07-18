@@ -43,14 +43,24 @@ per-role rules. A container holding only one role's key cannot act as another ro
 
 ## Configuration
 
-Configuration is a **per-repo JSON file** — there is no global config and nothing
-is passed at gate time. You write one JSON per repo and *associate* it once with
-`init-repo --config` (or `add-repo`, which uses the registry path by default).
+Configuration is a **per-repo JSON file** in the registry
+(`/etc/portitor/repos.d/<repo>.json`) — the **single canonical config identity**:
+the gate hooks, `add-role`, and `portitor pr` all read the same file. `init-repo`
+and `add-repo` default to it (`init-repo --config` remains for deliberate
+exceptions; `add-role` warns if a repo's baked hook path diverges from the
+registry file it edits). There is no global config and nothing is passed at gate
+time.
 
 ### Schema
 
 ```jsonc
 {
+  // REQUIRED. The on-disk format version; this binary operates only with
+  // exactly the version it understands (currently 1). Missing/lower/higher
+  // refuses to run — never gate with a partially understood config. Unknown
+  // keys, duplicate keys, and differently-cased keys are rejected outright.
+  "format_version": 1,
+
   // The protected branch. Pushes/deletes to it are rejected (use a feature branch + PR).
   // If omitted, derived from the bare repo's HEAD symref.
   "default_branch": "main",
@@ -194,6 +204,7 @@ fields, values, the record-extraction command) is config; portitor ships none.
 
 ```json
 {
+  "format_version": 1,
   "default_branch": "main",
   "allowed_signers": "/etc/portitor/allowed_signers",
   "upstream_slug": "youruser/yourrepo",
@@ -208,6 +219,7 @@ Accepts signed feature-branch pushes from the implementer key, rejects pushes to
 
 ```json
 {
+  "format_version": 1,
   "default_branch": "main",
   "allowed_signers": "/etc/portitor/allowed_signers",
   "upstream_remote": "upstream",

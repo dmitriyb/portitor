@@ -649,7 +649,7 @@ func initRepo(args []string) int {
 	bare := fs.String("bare", "", "path to the bare repo to create (required)")
 	def := fs.String("default", "main", "default branch")
 	upstream := fs.String("upstream", "", "upstream URL to mirror and forward to (optional)")
-	configPath := fs.String("config", "", "portitor config JSON for this repo (default <bare>/portitor.json)")
+	configPath := fs.String("config", "", "portitor config JSON for this repo (default: the registry, <repos.d>/<name>.json)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -659,7 +659,15 @@ func initRepo(args []string) int {
 	}
 	cfg := *configPath
 	if cfg == "" {
-		cfg = filepath.Join(*bare, "portitor.json")
+		// The registry is the single canonical config identity: the same file
+		// the gate hooks, add-role, and the pr API read. A divergent default
+		// here is how role grants used to silently miss the gate.
+		name := strings.TrimSuffix(filepath.Base(*bare), ".git")
+		if !config.ValidName(name) {
+			fmt.Fprintf(os.Stderr, "init-repo: cannot derive a registry config name from bare path %q; pass --config explicitly\n", *bare)
+			return 2
+		}
+		cfg = filepath.Join(config.ReposDir(), name+".json")
 	}
 
 	if err := git.Run("", "init", "--bare", "--initial-branch="+*def, *bare); err != nil {

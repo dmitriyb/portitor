@@ -50,7 +50,12 @@
     {
       "type": "functional",
       "title": "Provision a gated bare repo",
-      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (so agents clone the default from the proxy with no upstream credential), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand."
+      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (so agents clone the default from the proxy with no upstream credential), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand. Without --config the path defaults to the registry (<ReposDir>/<name>.json, name from the bare basename; a basename failing ValidName is a usage error) — the single canonical config identity every consumer (gate, add-role, pr) reads."
+    },
+    {
+      "type": "functional",
+      "title": "One canonical config identity with fail-closed format versioning and strict decode",
+      "description": "Every consumer reads the same registry file (<ReposDir>/<name>.json). The config carries format_version; this binary operates only with exactly the version it understands — missing/lower/higher refuses at load (gate rejects every push loudly; add-role/pr/validate-config refuse), never operating with a partially understood config. The version is independent of the application version (bumped only on a real format change; migrations are out of scope — the operator re-provisions). Decode is strict and token-level: top-level keys byte-exact against the known set, duplicate keys rejected in every object, non-lowercase keys rejected in schema objects (the roles/action_roles data maps keep only the duplicate check), unknown fields rejected. add-role warns when the target repo's baked hook config path differs from the registry file it edits. validate-config additionally requires fingerprint-shaped role keys (SHA256: + 43 base64) and non-empty role values. See arch_config.md."
     },
     {
       "type": "functional",
@@ -88,6 +93,12 @@
       "name": "Gate",
       "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and orchestrates the structural + semantic content-rule evaluation per commit.",
       "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "Config",
+      "description": "internal/config: the per-repo trust-root file — canonical registry identity (ReposDir()/<name>.json), token-level strict decode (exact top-level keys, duplicate/case discipline, DisallowUnknownFields), the fail-closed format_version guard, and Validate (gate-integrity presence, fingerprint-shaped role keys, action_roles verbs, content_rules compilation).",
+      "content": "arch_config.md",
       "implements": []
     },
     {

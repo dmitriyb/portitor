@@ -163,7 +163,9 @@ non-zero exit.
 the gated bare repo, optionally adds and fetches the upstream remote and seeds the default branch
 from it (so agents clone the default from the proxy with no upstream credential), and installs the
 `pre-receive`/`post-receive` hook shims (each exports `PORTITOR_CONFIG` and execs the matching
-subcommand). The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
+subcommand). Without `--config` the path defaults to the **registry** —
+`<ReposDir>/<name>.json`, the single canonical per-repo config identity every consumer reads
+(see `arch_config.md`). The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
 key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
 sshd under tini) — separate from the agent image, which holds no upstream credential.
 

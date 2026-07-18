@@ -43,7 +43,7 @@ func seedRepo(t *testing.T, roles, extraSignerLines string) (reposDir, cfgPath, 
 		roles = "{}"
 	}
 	cfgPath = filepath.Join(reposDir, "myrepo.json")
-	body := `{"default_branch":"main","allowed_signers":"` + signersPath + `","roles":` + roles + `}`
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath + `","roles":` + roles + `}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestAddRole_PostWriteValidation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PORTITOR_REPOS_DIR", dir)
 	cfg := filepath.Join(dir, "myrepo.json")
-	body := `{"default_branch":"main","allowed_signers":"/no/such/allowed_signers","roles":{}}`
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"/no/such/allowed_signers","roles":{}}`
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestAddRole_CreatesMissingSigners(t *testing.T) {
 	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
 	signers := filepath.Join(reposDir, "sub", "allowed_signers") // parent missing too
 	cfg := filepath.Join(reposDir, "myrepo.json")
-	body := `{"default_branch":"main","allowed_signers":"` + signers + `","roles":{}}`
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{}}`
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestAddRole_PreservesOtherFields(t *testing.T) {
 	}
 	cfg := filepath.Join(dir, "myrepo.json")
 	const contentRules = `{"version":1,"structural":{"rules":[{"name":"protect-gate","paths":["gate/**"],"operations":["delete"],"roles":{"not_in":["reviewer"]},"effect":"deny"}]}}`
-	body := `{"default_branch":"main","allowed_signers":"` + signers + `",` +
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `",` +
 		`"upstream_remote":"origin","upstream_slug":"acme/widgets",` +
 		`"content_rules":` + contentRules + `,` +
 		`"roles":{"` + goodFP + `":"reviewer"}}`

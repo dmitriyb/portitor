@@ -98,6 +98,17 @@ e.g. via `deploy/DEPLOY.md`). Note the fingerprint→role binding alone suffices
 but a signing role whose key is not yet in `allowed_signers` will have its commits rejected as
 untrusted until the key is added there.
 
+## Consistency with the baked hook path
+
+After every successful run — edits and idempotent no-ops alike — `add-role` reads the target
+repo's baked `pre-receive` shim (`<ReposRoot>/<name>.git/hooks/pre-receive`, last `export` line
+wins, as in the shell) and **warns** on stderr when the shim's `PORTITOR_CONFIG` differs from
+the registry file it edits — the state in which role grants
+made through the supported tool never reach the push gate (see `arch_config.md`). A missing bare
+repo or shim produces no warning (the repo may be provisioned elsewhere); a divergence is a
+warning, not an error, because a deliberate split (`init-repo --config`) is the operator's right —
+but it is never silent.
+
 ## Durability & validation
 
 - The config is written **atomically**: marshal to a temp file in the same directory, then

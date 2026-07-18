@@ -27,31 +27,50 @@ func TestValidateConfig(t *testing.T) {
 		return p
 	}
 
-	ok := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"}}`)
+	fp := "SHA256:" + strings.Repeat("a", 43)
+	ok := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"}}`)
 	if rc := validateConfig([]string{"--config", ok}); rc != 0 {
 		t.Fatalf("valid config: rc = %d, want 0", rc)
 	}
 
+	// Missing format_version → non-zero (hard fail-closed at load).
+	noVersion := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"}}`)
+	if rc := validateConfig([]string{"--config", noVersion}); rc == 0 {
+		t.Fatal("config without format_version should fail")
+	}
+
+	// Unknown top-level key → non-zero (strict decode).
+	unknownKey := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"},"surprise":true}`)
+	if rc := validateConfig([]string{"--config", unknownKey}); rc == 0 {
+		t.Fatal("config with an unknown key should fail")
+	}
+
 	// Missing required fields → non-zero.
-	badFields := write(`{"roles":{}}`)
+	badFields := write(`{"format_version":1,"roles":{}}`)
 	if rc := validateConfig([]string{"--config", badFields}); rc == 0 {
 		t.Fatal("config with empty default_branch/allowed_signers/roles should fail")
 	}
 
 	// allowed_signers points at a non-existent file → non-zero.
-	badSigners := write(`{"default_branch":"main","allowed_signers":"/no/such/file","roles":{"SHA256:a":"reviewer"}}`)
+	badSigners := write(`{"format_version":1,"default_branch":"main","allowed_signers":"/no/such/file","roles":{"` + fp + `":"reviewer"}}`)
 	if rc := validateConfig([]string{"--config", badSigners}); rc == 0 {
 		t.Fatal("config with unreadable allowed_signers should fail")
 	}
 
+	// A non-fingerprint roles key → non-zero.
+	badKey := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:short":"reviewer"}}`)
+	if rc := validateConfig([]string{"--config", badKey}); rc == 0 {
+		t.Fatal("config with a non-fingerprint roles key should fail")
+	}
+
 	// The retired role_rules key → non-zero (never silently dropped).
-	retired := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"role_rules":[{"name":"r"}]}`)
+	retired := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"},"role_rules":[{"name":"r"}]}`)
 	if rc := validateConfig([]string{"--config", retired}); rc == 0 {
 		t.Fatal("config with the retired role_rules key should fail")
 	}
 
 	// Malformed content_rules (unsupported version) → non-zero.
-	badRules := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"content_rules":{"version":99}}`)
+	badRules := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"},"content_rules":{"version":99}}`)
 	if rc := validateConfig([]string{"--config", badRules}); rc == 0 {
 		t.Fatal("config with an unsupported content_rules version should fail")
 	}

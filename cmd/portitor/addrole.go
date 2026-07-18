@@ -15,10 +15,6 @@ import (
 	"github.com/dmitriyb/portitor/internal/config"
 )
 
-// fingerprintRe matches a signer-key fingerprint as git reports it via %GF:
-// "SHA256:" followed by 43 chars of unpadded base64 (a SHA-256 digest).
-var fingerprintRe = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
-
 // roleNameRe guards a role label: non-empty, no whitespace or path separators.
 var roleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
@@ -51,7 +47,7 @@ func addRole(args []string) int {
 		fmt.Fprintf(os.Stderr, "add-role: invalid repo name %q (allowed: letters, digits, '.', '_', '-')\n", *repo)
 		return 2
 	}
-	if !fingerprintRe.MatchString(*fp) {
+	if !config.ValidFingerprint(*fp) {
 		fmt.Fprintf(os.Stderr, "add-role: invalid fingerprint %q (want SHA256: + 43 base64 chars)\n", *fp)
 		return 2
 	}
@@ -141,6 +137,7 @@ func addRole(args []string) int {
 	}
 
 	if !roleChanged && !needAppend {
+		warnHookDivergence(*repo, cfgPath)
 		fmt.Printf("add-role: %s %s -> %s (unchanged)\n", *repo, *fp, *role)
 		return 0
 	}
@@ -197,6 +194,8 @@ func addRole(args []string) int {
 		return 1
 	}
 
+	warnHookDivergence(*repo, cfgPath)
+
 	status := "added"
 	switch {
 	case cur != "" && roleChanged:
@@ -209,6 +208,57 @@ func addRole(args []string) int {
 	}
 	fmt.Printf("add-role: %s %s -> %s (%s)\n", *repo, *fp, *role, status)
 	return 0
+}
+
+// warnHookDivergence cross-checks the baked hook path on every successful run
+// (edits and idempotent no-ops alike): a repo whose pre-receive shim reads a
+// DIFFERENT config than the registry file being edited would never see the
+// grant. A deliberate split is the operator's right — but never silent.
+func warnHookDivergence(repo, cfgPath string) {
+	if baked, ok := bakedHookConfig(filepath.Join(config.ReposRoot(), repo+".git")); ok && !samePath(baked, cfgPath) {
+		fmt.Fprintf(os.Stderr, "add-role: warning: repo %q's pre-receive hook reads %s, not %s — grants in this file will not reach that gate\n",
+			repo, baked, cfgPath)
+	}
+}
+
+// bakedHookConfig extracts the PORTITOR_CONFIG path baked into a bare repo's
+// pre-receive shim. Like the shell, the LAST export line wins. ok is false when
+// the repo, shim, or export line is absent (the repo may be provisioned
+// elsewhere — no warning then).
+func bakedHookConfig(bareDir string) (string, bool) {
+	b, err := os.ReadFile(filepath.Join(bareDir, "hooks", "pre-receive"))
+	if err != nil {
+		return "", false
+	}
+	baked, found := "", false
+	for _, line := range strings.Split(string(b), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "export PORTITOR_CONFIG=")
+		if !ok {
+			continue
+		}
+		baked, found = shellUnquote(rest), true
+	}
+	return baked, found
+}
+
+// shellUnquote reverses shellQuote's single-quote wrapping (with the usual
+// quote-close/escape/quote-reopen escape sequence for embedded single quotes);
+// a value that isn't in that shape is returned as-is.
+func shellUnquote(s string) string {
+	if len(s) >= 2 && strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'") {
+		return strings.ReplaceAll(s[1:len(s)-1], `'\''`, "'")
+	}
+	return s
+}
+
+// samePath compares two paths after normalization (best-effort abs + clean).
+func samePath(a, b string) bool {
+	na, err1 := filepath.Abs(filepath.Clean(a))
+	nb, err2 := filepath.Abs(filepath.Clean(b))
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	return na == nb
 }
 
 // sshKeygenTimeout bounds the ssh-keygen subprocess (a local computation; a hang
