@@ -37,37 +37,50 @@ untouched field through `json.RawMessage`, so field values are byte-identical; t
 re-emitted with `json.MarshalIndent`, so top-level key order and whitespace may change on an actual
 mutation (an idempotent no-op re-writes nothing at all).
 
-**Overwrite onto an identity-only role is guarded.** Because `add-role`'s `allowed_signers` mutation is
-purely additive (it only ever adds/dedups, never removes — see below), an overwrite that rebinds a
-fingerprint *currently trusted in `allowed_signers`* to the identity-only `merger` role would leave that
-key both role=`merger` **and** trusted to sign — collapsing the isolation the `--pub` refusal for
-`merger` exists to protect. So an overwrite whose new role is identity-only (`merger`) is **refused with
-a loud error (exit 1) when the fingerprint's key is present in `allowed_signers`**; the config is left
-untouched. (Reconciling `allowed_signers` — removing the stale signer line — is out of band, so
+**Binding a trusted key to an identity-only role is guarded — on every run.** Because
+`add-role`'s `allowed_signers` mutation is purely additive (it only ever adds/dedups, never
+removes — see below), a run that binds a fingerprint *currently trusted in `allowed_signers`* to
+an identity-only role would leave (or has already left) that key both landing-only **and**
+trusted to sign — collapsing the isolation the `--pub` refusal exists to protect. So **any** run
+whose role is identity-only — a fresh add, an overwrite, or an idempotent re-bind that would
+otherwise be a no-op — is **refused with a loud error (exit 1) when the fingerprint's key is
+present in `allowed_signers`**; the config is left untouched. (The no-op case deliberately
+refuses rather than reporting "unchanged": it means the collapsed state already exists on disk,
+and staying silent about it would be the one thing worse than having reached it.) (Reconciling `allowed_signers` — removing the stale signer line — is out of band, so
 `add-role` refuses rather than silently leaving a trusted-yet-identity-only key.) Rebinding a
-fingerprint that is *not* in `allowed_signers` to `merger` is an ordinary overwrite.
+fingerprint that is *not* in `allowed_signers` to an identity-only role is an ordinary overwrite.
+Two fail-closed rules inside this guard's signers-file scan:
+
+- an **ssh-keygen invocation failure** while fingerprinting an existing entry's key blob is a
+  loud error (exit 1), never "skip the line" — a skipped line is exactly a wrongly-passing guard.
+  A line with no key blob at the positional slot (a comment, garbage) is skipped. Key blobs are
+  recognized by the OpenSSH keytype prefixes (`ssh-`, `ecdsa-`, `sk-`) — a **version contract**
+  with the deployed OpenSSH (which currently has no public-key type outside them); a
+  hypothetical future type outside the set would be invisible to this scan.
+- a **`cert-authority` entry anywhere in the file makes the guard refuse conservatively** (exit
+  1): a CA line trusts every certificate it signed, so the fingerprint's key may be trusted
+  *indirectly* in a way portitor cannot enumerate. The operator reconciles out of band.
 
 ## `allowed_signers` handling (`--pub`)
 
-A role is either a **signing role** or **identity-only**. The classification is a **closed denylist**,
-not an enumeration: **identity-only roles are exactly `{merger}`; every other role name is a signing
-role.** This is the only rule consistent with free-form/split role names (`implementer_work`,
-`reviewer_ci`, …) — the check is a membership test against `{merger}`, never an allowlist of named
-signing roles.
+A role is either a **signing role** or **identity-only**. The classification is **per-repo
+config, not code** — portitor ships no role names anywhere: the config's `identity_only_roles`
+list names the roles whose keys must never gain commit-signing trust; every other role name is a
+signing role. The check is a membership test against that list, never an allowlist of named
+signing roles (the only rule consistent with free-form/split role names — `implementer_work`,
+`reviewer_ci`, …).
 
-> **Operator note — the identity-only role must be named exactly `merger`.** This security property
-> is bound to a single exact string in *two* places: the `add-role` `--pub` refusal here, and the
-> action policy that grants merge/close power (`spec/action`, which likewise keys off exact `merger`
-> — and `owner`). A variant spelling (`merger_ci`, `Merger`, `merge`) is treated as an **ordinary
-> signing role** by `add-role` (so `--pub` would grant it commit-signing trust) — but it also has **no
-> landing power anywhere**, because the action policy only recognizes the exact string `merger`. So a
-> mis-spelled merge role is inert rather than dangerous; still, to get both the landing authority and
-> the `--pub` refusal, name the role exactly `merger`.
+> **Operator note — keep the three config surfaces aligned.** A landing identity works when the
+> same role name appears in: `roles` (fingerprint → role), `action_roles` (granting it
+> `merge`/`close`), and `identity_only_roles` (denying it commit-signing trust). A name listed in
+> `action_roles.merge` but missing from `identity_only_roles` is a landing role whose key `add-role
+> --pub` would happily trust for signing — the collapse this classification exists to prevent. An
+> absent `identity_only_roles` means every role is a signing role.
 
-Identity-only roles authorize landing over the action channel and **must never be able
-to sign commits** — `merger`'s dedicated key exists only to merge/close (see `spec/action`). Signing
-roles (everything that is not `merger`) sign commits and therefore must appear in `allowed_signers` or
-the gate rejects their commits as untrusted (`%G? == U`).
+Identity-only roles authorize landing over the action channel and **must never be able to sign
+commits** — the dedicated landing key exists only to merge/close (see `spec/action`). Signing
+roles (everything not listed) sign commits and therefore must appear in `allowed_signers` or the
+gate rejects their commits as untrusted (`%G? == U`).
 
 Behavior when `--pub` is given:
 
@@ -81,8 +94,15 @@ Behavior when `--pub` is given:
   ```
 
   The principal label is **cosmetic** — portitor re-derives the role from the fingerprint at gate
-  time — so it is set to the role name purely for readability. The append is **deduped**: if a line
-  carrying the same key blob is already present, nothing is added (idempotent).
+  time — so it is set to the role name purely for readability. The append is **deduped against
+  live entries only**, per the consumer's grammar: a line counts as already-present only if it is
+  not a comment (`#`) or blank line, carries the same key blob at its positional key slot
+  (principal first, then options, then keytype+keydata), is valid for the `git` namespace
+  (`namespaces` option absent or listing `git`), and carries **no validity window**
+  (`valid-after`/`valid-before` — a time-boxed entry must not suppress appending the durable
+  one). A key blob that appears only in a comment, a non-git-namespace line, or a time-boxed
+  entry does **not** count — the append proceeds (idempotent for the lines add-role itself
+  writes, which are always live).
 
   If the config's `allowed_signers` file does **not yet exist** (the operator may manage it out of
   band and not have created it), the first append **creates it** at the config-declared path with mode
@@ -97,6 +117,23 @@ When `--pub` is **omitted**, `allowed_signers` is left untouched (the operator m
 e.g. via `deploy/DEPLOY.md`). Note the fingerprint→role binding alone suffices for role *attribution*;
 but a signing role whose key is not yet in `allowed_signers` will have its commits rejected as
 untrusted until the key is added there.
+
+## Serialization (one writer at a time)
+
+The whole read-decide-write sequence — the config read, the identity-only guard's signers-file
+read, both writes, and the post-write validation — runs under **exclusive advisory locks**:
+`flock` on `<config>.lock` next to the registry file, and (because one `allowed_signers` file
+may be shared across many repo configs) a second `flock` on `<allowed_signers>.lock`, always
+acquired in that fixed order (config first — no deadlock). Concurrent `add-role` runs serialize
+on the same repo via the first lock and across repos sharing a trust file via the second.
+Without them, two races are live: a lost update (both read, both write, one line or binding
+vanishes) and the check-then-act window in which a concurrent `--pub` append lands between the
+identity-only guard's read and the roles write — establishing the exact trusted-yet-identity-only
+state the guard refuses. The config is read **once**, from one buffer: the typed view and the
+preserved-raw view parse the same bytes, so a hybrid write mixing two on-disk versions is
+impossible. The locks serialize `add-role` against itself (the sole writer of both files in the
+supported flow); readers (the gate) are lock-free by design — they read atomically-renamed
+snapshots.
 
 ## Consistency with the baked hook path
 
@@ -133,14 +170,17 @@ but it is never silent.
 
 ## Exit codes
 
-- `0` — applied, or an idempotent no-op re-run.
+- `0` — applied, or an idempotent no-op re-run (exception: a no-op re-bind to an identity-only
+  role whose key is trusted in `allowed_signers` exits 1 — the collapsed state already exists
+  and is never reported silently).
 - `2` — usage error (missing/malformed flags: bad fingerprint syntax, empty/invalid role, missing
   `--repo`, or a **present-but-invalid `--repo` value** that fails `ValidName`, e.g. `../escape` — a bad
   flag value is a usage error).
-- `1` — operational error (config not found; unreadable or malformed `--pub` file, or an `ssh-keygen`
-  invocation failure while computing the pub's fingerprint; `--pub` fingerprint mismatch; `--pub` for an
-  identity-only role; an overwrite onto an identity-only role whose key is already in `allowed_signers`;
-  write failure; or post-write validation failure). For every **pre-write** rejection — bad `--pub`,
+- `1` — operational error (config not found; a lock that cannot be acquired; unreadable or malformed
+  `--pub` file, or an `ssh-keygen` invocation failure while computing the pub's fingerprint — or an
+  existing entry's, inside the guard; `--pub` fingerprint mismatch; `--pub` for an identity-only
+  role; any binding of an identity-only role whose key is already in `allowed_signers`; a
+  `cert-authority` entry encountered by the guard; write failure; or post-write validation failure). For every **pre-write** rejection — bad `--pub`,
   fingerprint mismatch, `--pub`/overwrite identity-only guards, and config-not-found — the config is
   left untouched (nothing is written before these checks pass). The **post-write** cases — an
   `allowed_signers` append that fails after the roles write, and post-write validation failure — exit 1

@@ -102,6 +102,11 @@ time.
     "close":   ["merger", "owner"]
   },
 
+  // Roles whose keys are landing-only and must never gain commit-signing trust.
+  // add-role refuses --pub for them and refuses rebinding an already-trusted
+  // key to them. Absent = every role is a signing role.
+  "identity_only_roles": ["merger"],
+
   // Check names that must be successful before a merge (matched against the
   // PR's statusCheckRollup). Empty/absent = advisory (repos without CI yet).
   "required_checks": ["ci/test"],
@@ -159,12 +164,14 @@ Standard OpenSSH format, one signer per line (`<principal> namespaces="git" <key
 ```
 dca-implementer namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…
 dca-reviewer    namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…
-dca-merger      namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA…
 ```
 
 The principal label is cosmetic for portitor — the **role comes from the fingerprint**
 via `roles` above; `allowed_signers` only establishes that the signature is trusted.
-(The `merger` key never signs commits; listing it is harmless.)
+**Keys of `identity_only_roles` (e.g. the landing identity) must NOT be listed**:
+a landing-only credential that can also sign commits collapses the role isolation,
+so `add-role` refuses to trust such keys and refuses to rebind an already-trusted
+key to an identity-only role.
 
 ### Roles
 
@@ -229,6 +236,14 @@ Accepts signed feature-branch pushes from the implementer key, rejects pushes to
     "SHA256:aaaa…": "implementer",
     "SHA256:bbbb…": "reviewer",
     "SHA256:cccc…": "merger"
+  },
+  "identity_only_roles": ["merger"],
+  "action_roles": {
+    "fetch":   ["implementer", "reviewer", "merger", "owner"],
+    "comment": ["implementer", "reviewer", "merger", "owner"],
+    "review":  ["reviewer", "owner"],
+    "merge":   ["merger", "owner"],
+    "close":   ["merger", "owner"]
   },
   "content_rules": {
     "version": 1,

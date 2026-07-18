@@ -13,8 +13,12 @@ Contents+PR RW on the sandbox), and the dca scripts on PATH (from dot).
 mkdir -p ~/.dca-keys/portitor-config/repos.d && cd ~/.dca-keys
 for r in implementer reviewer merger; do ssh-keygen -t ed25519 -N "" -C "dca-$r" -f "$r"; done
 
-# allowed_signers (gate verifies commit signatures against this)
-for r in implementer reviewer merger; do
+# allowed_signers (gate verifies commit signatures against this).
+# The merger key is deliberately ABSENT: it is a landing-only identity
+# (identity_only_roles below) and must never gain commit-signing trust —
+# add-role refuses to trust it, and listing it here would collapse that
+# isolation.
+for r in implementer reviewer; do
   printf 'dca-%s namespaces="git" %s\n' "$r" "$(awk '{print $1,$2}' "$r.pub")"
 done > portitor-config/allowed_signers
 
@@ -35,6 +39,7 @@ jq -n --arg i "$i" --arg v "$v" --arg m "$m" '{
   default_branch:"main", allowed_signers:"/etc/portitor/allowed_signers", upstream_remote:"upstream",
   upstream_slug:"dmitriyb/dca-sandbox",
   roles: {($i):"implementer", ($v):"reviewer", ($m):"merger"},
+  identity_only_roles: ["merger"],
   action_roles: {
     fetch:   ["implementer","reviewer","merger","owner"],
     comment: ["implementer","reviewer","merger","owner"],

@@ -40,6 +40,34 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+// TestIdentityOnly: classification is config, not code; absent list = every
+// role is a signing role.
+func TestIdentityOnly(t *testing.T) {
+	s := Settings{IdentityOnlyRoles: []string{"lander", "bot"}}
+	if !s.IdentityOnly("lander") || !s.IdentityOnly("bot") {
+		t.Fatal("listed roles must classify as identity-only")
+	}
+	if s.IdentityOnly("reviewer") || s.IdentityOnly("") {
+		t.Fatal("unlisted roles are signing roles")
+	}
+	if (Settings{}).IdentityOnly("lander") {
+		t.Fatal("absent list means every role is a signing role")
+	}
+	// The key parses through the strict decode path.
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	body := `{"format_version":1,"default_branch":"m","allowed_signers":"x","roles":{},"identity_only_roles":["lander"]}`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := LoadFile(p)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if !s2.IdentityOnly("lander") {
+		t.Fatal("identity_only_roles lost through decode")
+	}
+}
+
 // TestLoadRequiresConfigPath: the hook consumers must refuse to run without a
 // config — a gate with a zero config is not uniformly fail-closed.
 func TestLoadRequiresConfigPath(t *testing.T) {

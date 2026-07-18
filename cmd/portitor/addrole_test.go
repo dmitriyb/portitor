@@ -43,7 +43,9 @@ func seedRepo(t *testing.T, roles, extraSignerLines string) (reposDir, cfgPath, 
 		roles = "{}"
 	}
 	cfgPath = filepath.Join(reposDir, "myrepo.json")
-	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath + `","roles":` + roles + `}`
+	// identity_only_roles is config, not code: the fixtures declare "merger"
+	// landing-only, matching the recommended deployment policy.
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath + `","identity_only_roles":["merger"],"roles":` + roles + `}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

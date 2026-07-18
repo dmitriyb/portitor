@@ -41,6 +41,22 @@ type Settings struct {
 	// AuditLog, when set, receives one JSON line per gate/action decision.
 	// Empty disables the trail. Write failures never change a verdict.
 	AuditLog string `json:"audit_log"`
+	// IdentityOnlyRoles lists the roles whose keys must never gain
+	// commit-signing trust (landing-only identities). Classification is
+	// config, not code — portitor ships no role names. Absent = every role
+	// is a signing role.
+	IdentityOnlyRoles []string `json:"identity_only_roles"`
+}
+
+// IdentityOnly reports whether role is one of the config's identity-only
+// (landing-only) roles.
+func (s Settings) IdentityOnly(role string) bool {
+	for _, r := range s.IdentityOnlyRoles {
+		if r == role {
+			return true
+		}
+	}
+	return false
 }
 
 // ReposDir is the registry holding one <repo>.json per managed repo. init-repo points
@@ -128,28 +144,41 @@ func readInto(path string, s *Settings) error {
 	if err != nil {
 		return fmt.Errorf("read config %s: %w", path, err)
 	}
-	// Token-level key discipline first (exact top-level keys, duplicates,
-	// lowercase schema keys), then a strict decode, then the version guard —
-	// all fail-closed before any consumer sees the config.
-	if err := checkRawKeys(b); err != nil {
+	parsed, err := Parse(b)
+	if err != nil {
 		return fmt.Errorf("config %s: %w", path, err)
+	}
+	*s = parsed
+	return nil
+}
+
+// Parse decodes one config buffer through the full discipline — token-level
+// key check (exact top-level keys, duplicates, lowercase schema keys), strict
+// decode, trailing-content rejection, and the format-version guard — all
+// fail-closed before any consumer sees the config. Exposed so a caller that
+// must hold one buffer (add-role's typed + preserved-raw views) parses the
+// same bytes it preserves.
+func Parse(b []byte) (Settings, error) {
+	var s Settings
+	if err := checkRawKeys(b); err != nil {
+		return s, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(s); err != nil {
-		return fmt.Errorf("parse config %s: %w", path, err)
+	if err := dec.Decode(&s); err != nil {
+		return s, fmt.Errorf("parse: %w", err)
 	}
 	if dec.More() {
 		// Trailing content (a concatenated or merge-damaged file) would be
 		// silently dropped by a single Decode — the mis-keyed-file class this
 		// discipline exists to refuse.
-		return fmt.Errorf("config %s: trailing content after the config object", path)
+		return s, fmt.Errorf("trailing content after the config object")
 	}
 	if s.FormatVersion != SupportedFormatVersion {
-		return fmt.Errorf("config %s: format_version %d is not supported by this binary (want %d); refusing to operate with a partially understood config",
-			path, s.FormatVersion, SupportedFormatVersion)
+		return s, fmt.Errorf("format_version %d is not supported by this binary (want %d); refusing to operate with a partially understood config",
+			s.FormatVersion, SupportedFormatVersion)
 	}
-	return nil
+	return s, nil
 }
 
 // topLevelKeys is the exact (byte-exact, case-sensitive) allowed key set of the
@@ -168,6 +197,7 @@ var topLevelKeys = map[string]bool{
 	"action_roles":                    true,
 	"required_checks":                 true,
 	"audit_log":                       true,
+	"identity_only_roles":             true,
 }
 
 // dataMapKeys names the top-level keys whose object values are DATA maps

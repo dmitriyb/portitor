@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dmitriyb/portitor/internal/config"
@@ -17,11 +18,6 @@ import (
 
 // roleNameRe guards a role label: non-empty, no whitespace or path separators.
 var roleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-
-// identityOnlyRoles is the closed denylist of roles that must NEVER be trusted to
-// sign commits (landing-only credentials). Every other role name is a signing role.
-// See spec/gate/arch_add_role.md.
-var identityOnlyRoles = map[string]bool{"merger": true}
 
 // addRole binds a signer-key fingerprint to a role inside an already-provisioned
 // repo config (repos.d/<name>.json), a re-runnable init step. It upserts
@@ -58,16 +54,28 @@ func addRole(args []string) int {
 
 	cfgPath := filepath.Join(config.ReposDir(), *repo+".json")
 
-	// ---- load the existing config (operational errors, exit 1) ----
+	// ---- serialize: one writer at a time (operational errors, exit 1) ----
+	// The exclusive lock spans the whole read-decide-write sequence over BOTH
+	// files, including the identity-only guard's signers read — closing the
+	// lost-update and check-then-act races between concurrent runs.
+	unlock, err := acquireLock(cfgPath + ".lock")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "add-role: %v\n", err)
+		return 1
+	}
+	defer unlock()
+
+	// ---- load the existing config ONCE, from one buffer ----
+	// The typed view and the preserved-raw view parse the same bytes, so a
+	// hybrid write mixing two on-disk versions is impossible.
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "add-role: %v (run init-repo/add-repo first)\n", err)
 		return 1
 	}
-	// Settings gives typed access to allowed_signers + the current role map.
-	s, err := config.LoadFile(cfgPath)
+	s, err := config.Parse(raw)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "add-role: %v\n", err)
+		fmt.Fprintf(os.Stderr, "add-role: config %s: %v\n", cfgPath, err)
 		return 1
 	}
 	// A raw object view preserves every field we do not touch when we rewrite.
@@ -77,7 +85,28 @@ func addRole(args []string) int {
 		return 1
 	}
 
-	identityOnly := identityOnlyRoles[*role]
+	// The allowed_signers file may be SHARED across repos (one trust file, many
+	// registry configs) — the per-config lock alone would let two runs on
+	// different repos race on it. Second lock, always acquired after the config
+	// lock (fixed order, no deadlock).
+	if s.AllowedSigners != "" {
+		// The signers file may not exist yet (first append creates it, parent
+		// included) — the lock needs the parent directory now.
+		if err := os.MkdirAll(filepath.Dir(s.AllowedSigners), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "add-role: %v\n", err)
+			return 1
+		}
+		unlockSigners, err := acquireLock(s.AllowedSigners + ".lock")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "add-role: %v\n", err)
+			return 1
+		}
+		defer unlockSigners()
+	}
+
+	// Signing-vs-identity classification is config, not code (portitor ships
+	// no role names): the repo's identity_only_roles list decides.
+	identityOnly := s.IdentityOnly(*role)
 
 	// ---- validate --pub BEFORE any write (so a bad pub never mutates state) ----
 	var (
@@ -317,12 +346,86 @@ func signerLineKeyBlob(f []string) (keyType, keyData string, ok bool) {
 // keyBlobFromFieldsAt finds the first "<keytype> <keydata>" pair at or after index
 // start.
 func keyBlobFromFieldsAt(f []string, start int) (keyType, keyData string, ok bool) {
+	kt, kd, _, ok := keyBlobFromFieldsAtIdx(f, start)
+	return kt, kd, ok
+}
+
+// keyBlobFromFieldsAtIdx is keyBlobFromFieldsAt returning also the keytype's
+// index (so callers can inspect the options region before it).
+func keyBlobFromFieldsAtIdx(f []string, start int) (keyType, keyData string, idx int, ok bool) {
 	for i := start; i < len(f); i++ {
 		if isKeyType(f[i]) && i+1 < len(f) {
-			return f[i], f[i+1], true
+			return f[i], f[i+1], i, true
 		}
 	}
-	return "", "", false
+	return "", "", 0, false
+}
+
+// signerEntry is one parsed allowed_signers line, per the consumer's grammar:
+// principal first, then options, then the keytype+keydata pair.
+type signerEntry struct {
+	keyType, keyData string
+	certAuthority    bool
+	gitNamespace     bool // namespaces option absent, or listing "git"
+	timeBoxed        bool // valid-after / valid-before present
+}
+
+// live reports whether the entry would actually verify a git signature today,
+// durably: git-namespace-valid and not time-boxed. Dedup counts ONLY live
+// entries — a key blob appearing in a comment, a non-git-namespace line, or a
+// time-boxed entry must not suppress appending the durable line the consumer
+// needs.
+func (e signerEntry) live() bool { return e.gitNamespace && !e.timeBoxed && !e.certAuthority }
+
+// parseSignerLine parses one line. ok is false for blank lines, comments, and
+// lines with no positional key blob (they cannot be keys the consumer trusts).
+func parseSignerLine(line string) (signerEntry, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return signerEntry{}, false
+	}
+	f := strings.Fields(trimmed)
+	kt, kd, idx, ok := keyBlobFromFieldsAtIdx(f, 1)
+	if !ok {
+		return signerEntry{}, false
+	}
+	e := signerEntry{keyType: kt, keyData: kd, gitNamespace: true}
+	for _, opt := range f[1:idx] {
+		lower := strings.ToLower(opt)
+		switch {
+		case lower == "cert-authority":
+			e.certAuthority = true
+		case strings.HasPrefix(lower, "namespaces="):
+			val := strings.Trim(opt[len("namespaces="):], `"`)
+			e.gitNamespace = false
+			for _, ns := range strings.Split(val, ",") {
+				if strings.EqualFold(strings.TrimSpace(ns), "git") {
+					e.gitNamespace = true
+					break
+				}
+			}
+		case strings.HasPrefix(lower, "valid-after="), strings.HasPrefix(lower, "valid-before="):
+			e.timeBoxed = true
+		}
+	}
+	return e, true
+}
+
+// acquireLock takes an exclusive advisory flock on path (created 0600),
+// returning the release func. Blocking: concurrent add-role runs serialize.
+func acquireLock(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 func isKeyType(tok string) bool {
@@ -331,8 +434,11 @@ func isKeyType(tok string) bool {
 		strings.HasPrefix(tok, "sk-")
 }
 
-// allowedSignersHasBlob reports whether the allowed_signers file already carries a
-// line with the given key blob (dedup). A missing file is not present (no error).
+// allowedSignersHasBlob reports whether the allowed_signers file already carries
+// a LIVE entry with the given key blob (dedup per the consumer's grammar: a
+// blob appearing only in a comment, a non-git-namespace line, or a time-boxed
+// entry does not count — the durable line is still needed). A missing file is
+// not present (no error).
 func allowedSignersHasBlob(path, keyData string) (bool, error) {
 	if path == "" || keyData == "" {
 		return false, nil
@@ -345,18 +451,26 @@ func allowedSignersHasBlob(path, keyData string) (bool, error) {
 		return false, fmt.Errorf("read allowed_signers %s: %w", path, err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		for _, tok := range strings.Fields(line) {
-			if tok == keyData {
-				return true, nil
-			}
+		e, ok := parseSignerLine(line)
+		if ok && e.live() && e.keyData == keyData {
+			return true, nil
 		}
 	}
 	return false, nil
 }
 
-// allowedSignersHasFingerprint reports whether any key in the allowed_signers file
-// has the given fingerprint. Used to guard rebinding a trusted key to an
-// identity-only role. A missing file is not present (no error).
+// allowedSignersHasFingerprint reports whether any key in the allowed_signers
+// file has the given fingerprint. Used to guard rebinding a trusted key to an
+// identity-only role, so its failure directions are conservative:
+//   - an ssh-keygen failure on an existing entry is FATAL (a skipped line is
+//     exactly a wrongly-passing guard), unlike a line with no key blob at the
+//     positional slot, which cannot be a key the consumer trusts;
+//   - a cert-authority entry anywhere refuses outright — certified keys cannot
+//     be enumerated, so the fingerprint may be trusted indirectly;
+//   - entries count regardless of namespace or validity window (the guard is
+//     broad where the dedup is narrow).
+//
+// A missing file is not present (no error).
 func allowedSignersHasFingerprint(path, fp string) (bool, error) {
 	if path == "" {
 		return false, nil
@@ -369,14 +483,16 @@ func allowedSignersHasFingerprint(path, fp string) (bool, error) {
 		return false, fmt.Errorf("read allowed_signers %s: %w", path, err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		kt, kd, ok := signerLineKeyBlob(strings.Fields(line))
+		e, ok := parseSignerLine(line)
 		if !ok {
 			continue
 		}
-		got, err := keyBlobFingerprint(kt, kd)
+		if e.certAuthority {
+			return false, fmt.Errorf("allowed_signers %s contains a cert-authority entry; certified keys cannot be enumerated — refusing the identity-only rebind (reconcile allowed_signers out of band)", path)
+		}
+		got, err := keyBlobFingerprint(e.keyType, e.keyData)
 		if err != nil {
-			// A malformed existing line is skipped, not fatal.
-			continue
+			return false, fmt.Errorf("fingerprint existing allowed_signers entry: %w", err)
 		}
 		if got == fp {
 			return true, nil
