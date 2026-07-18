@@ -4,6 +4,11 @@
   "requirements": [
     {
       "type": "functional",
+      "title": "Restrict ref updates to the branch namespace",
+      "description": "Every ref update must target refs/heads/<name> (non-empty name). Any other namespace — refs/tags/*, refs/notes/*, and especially refs/replace/* (whose objects substitute for others in later git reads) — is a 'ref-namespace' violation, for creates, updates, and deletions alike; a refused ref gets no further evaluation."
+    },
+    {
+      "type": "functional",
       "title": "Reject pushes to the default branch",
       "description": "A ref update targeting refs/heads/<default> (push or deletion) is a violation. The default branch is taken from Config.DefaultBranch, else derived from the receiving repo's HEAD symref."
     },
@@ -54,6 +59,16 @@
     },
     {
       "type": "non-functional",
+      "title": "Deterministic verification environment",
+      "description": "The gate's verdict is a function of the push, the repo, and the config only. Every portitor git subprocess disables replace-object substitution (core.useReplaceRefs=false); the gate's fact-gathering calls mask global/system git config (GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM=/dev/null); the allowedSignersFile pin is passed unconditionally (an empty configured path makes every signature %G? == U, so a missing trust root deterministically rejects, never falls back to ambient config). Every subprocess (git, gh, ssh-keygen) runs under a deadline; a hung or failed check rejects, never accepts."
+    },
+    {
+      "type": "non-functional",
+      "title": "Validate hook stdin before use",
+      "description": "pre/post-receive stdin lines must parse as '<old> <new> <ref>' with each SHA exactly 40 hex chars or all-zero and the ref 'refs/'-prefixed with no control bytes; any malformed line rejects the whole push. Configured remote names are validated (non-empty, no leading '-', no whitespace/control) before reaching git argv."
+    },
+    {
+      "type": "non-functional",
       "title": "Gate is a pure, isolation-testable function",
       "description": "Check(repoDir, updates, cfg) -> ([]Violation, error) shells out only to git for facts, so it is testable with ephemeral throwaway keys and a temp bare repo — no real credentials or hardware."
     }
@@ -73,7 +88,7 @@
     },
     {
       "name": "PreReceiveCommand",
-      "description": "The `portitor pre-receive` subcommand: parses stdin ref updates, loads settings from the PORTITOR_CONFIG JSON file (gate.Config + upstream_remote) with env overrides (PORTITOR_DEFAULT_BRANCH, PORTITOR_ALLOWED_SIGNERS, PORTITOR_UPSTREAM_REMOTE; repo dir from GIT_DIR), runs Gate.Check, and maps the result to an exit code + stderr report.",
+      "description": "The `portitor pre-receive` subcommand: parses and validates stdin ref updates, loads settings from the PORTITOR_CONFIG JSON file, runs Gate.Check, and maps the result to an exit code + stderr report. The gate-integrity fields (default_branch, allowed_signers, roles, rules) come solely from the config file — they have NO env override, so a stray env var can never weaken the gate. Only the operational forwarding fields honor env (PORTITOR_UPSTREAM_REMOTE, PORTITOR_UPSTREAM_SLUG); the repo dir comes from GIT_DIR.",
       "content": "arch_pre_receive.md",
       "implements": []
     },

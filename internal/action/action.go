@@ -8,23 +8,35 @@
 package action
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// ghTimeout bounds every gh subprocess (network calls to GitHub). A hung gh
+// must never block a hook or an action indefinitely.
+const ghTimeout = 2 * time.Minute
 
 // Runner executes gh with the given args and returns stdout. Swapped in tests.
 type Runner func(args ...string) (string, error)
 
 // defaultRunner runs the real gh binary.
 func defaultRunner(args ...string) (string, error) {
-	cmd := exec.Command("gh", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.WaitDelay = 5 * time.Second
 	var out, errb strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return out.String(), fmt.Errorf("gh %s: timed out after %s", strings.Join(args, " "), ghTimeout)
+		}
 		return out.String(), fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil

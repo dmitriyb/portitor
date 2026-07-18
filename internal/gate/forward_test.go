@@ -39,6 +39,23 @@ func TestForward(t *testing.T) {
 		}
 	})
 
+	t.Run("non-branch ref not forwarded", func(t *testing.T) {
+		results, err := Forward(e.bare, []RefUpdate{{OldSHA: base, NewSHA: feat, Ref: "refs/tags/v1"}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 0 {
+			t.Fatalf("expected no forwards for a tag ref, got %+v", results)
+		}
+	})
+
+	t.Run("invalid remote name refused", func(t *testing.T) {
+		bad := ForwardConfig{UpstreamRemote: "--force", DefaultBranch: "main"}
+		if _, err := Forward(e.bare, []RefUpdate{{OldSHA: base, NewSHA: feat, Ref: "refs/heads/feature"}}, bad); err == nil {
+			t.Fatal("expected an error for a remote name shaped like an option")
+		}
+	})
+
 	t.Run("default branch not forwarded", func(t *testing.T) {
 		results, err := Forward(e.bare, []RefUpdate{{OldSHA: base, NewSHA: feat, Ref: "refs/heads/main"}}, cfg)
 		if err != nil {
@@ -47,7 +64,11 @@ func TestForward(t *testing.T) {
 		if len(results) != 0 {
 			t.Fatalf("expected no forwards for the default branch, got %+v", results)
 		}
-		if refExists(upstream, "refs/heads/main") {
+		exists, err := refExists(upstream, "refs/heads/main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists {
 			t.Fatalf("upstream main should not have been forwarded")
 		}
 	})

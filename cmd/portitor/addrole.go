@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/dmitriyb/portitor/internal/config"
 )
@@ -209,11 +211,18 @@ func addRole(args []string) int {
 	return 0
 }
 
+// sshKeygenTimeout bounds the ssh-keygen subprocess (a local computation; a hang
+// would otherwise block add-role indefinitely).
+const sshKeygenTimeout = 15 * time.Second
+
 // sshKeygenFingerprint computes the SHA256 fingerprint of an OpenSSH public key
 // file by delegating to `ssh-keygen -lf` (mirroring the gate's "delegate the crypto
 // to the tool" stance). A read/parse failure surfaces as an error.
 func sshKeygenFingerprint(pubPath string) (string, error) {
-	cmd := exec.Command("ssh-keygen", "-l", "-f", pubPath)
+	ctx, cancel := context.WithTimeout(context.Background(), sshKeygenTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-l", "-f", pubPath)
+	cmd.WaitDelay = 5 * time.Second
 	var out, errb strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &errb

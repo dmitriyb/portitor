@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/dmitriyb/portitor/internal/action"
@@ -52,6 +53,37 @@ func TestValidateConfig(t *testing.T) {
 	// Missing path → exit 2.
 	if rc := validateConfig([]string{"--config", filepath.Join(dir, "nope.json")}); rc != 1 {
 		t.Fatalf("missing config file: rc = %d, want 1", rc)
+	}
+}
+
+func TestParseUpdates(t *testing.T) {
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	zero := strings.Repeat("0", 40)
+
+	t.Run("valid lines parse", func(t *testing.T) {
+		in := sha + " " + zero + " refs/heads/gone\n" + zero + " " + sha + " refs/heads/new\n"
+		us, err := parseUpdates(strings.NewReader(in))
+		if err != nil {
+			t.Fatalf("parseUpdates: %v", err)
+		}
+		if len(us) != 2 || us[1].Ref != "refs/heads/new" {
+			t.Fatalf("updates = %+v", us)
+		}
+	})
+
+	bad := []string{
+		sha + " " + sha,                              // two fields
+		sha[:12] + " " + sha + " refs/heads/x",       // short SHA
+		sha + " not-a-sha refs/heads/x",              // garbage SHA
+		sha + " " + sha + " heads/x",                 // no refs/ prefix
+		sha + " " + sha + " refs/heads/a\x01b",       // control byte in ref
+	}
+	for _, line := range bad {
+		t.Run("rejects "+line, func(t *testing.T) {
+			if _, err := parseUpdates(strings.NewReader(line + "\n")); err == nil {
+				t.Fatalf("parseUpdates(%q) accepted a malformed line", line)
+			}
+		})
 	}
 }
 

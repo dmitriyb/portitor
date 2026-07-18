@@ -429,8 +429,11 @@ func shellSplit(s string) ([]string, error) {
 func ghClient(s config.Settings) action.GH {
 	slug := s.UpstreamSlug
 	if slug == "" {
-		if url, err := git.Output(repoDir(), "remote", "get-url", upstreamRemote(s)); err == nil {
-			slug = deriveSlug(strings.TrimSpace(url))
+		remote := upstreamRemote(s)
+		if git.ValidRemoteName(remote) {
+			if url, err := git.Output(repoDir(), "remote", "get-url", remote); err == nil {
+				slug = deriveSlug(strings.TrimSpace(url))
+			}
 		}
 	}
 	return action.GH{Repo: slug}
@@ -561,7 +564,13 @@ func parseUpdates(r io.Reader) ([]gate.RefUpdate, error) {
 		if len(f) != 3 {
 			return nil, fmt.Errorf("malformed hook line: %q", line)
 		}
-		us = append(us, gate.RefUpdate{OldSHA: f[0], NewSHA: f[1], Ref: f[2]})
+		u := gate.RefUpdate{OldSHA: f[0], NewSHA: f[1], Ref: f[2]}
+		// Fail-closed shape check before anything reaches git argv: SHAs must be
+		// 40-hex-or-zero, the ref refs/-prefixed with no control bytes.
+		if err := u.Validate(); err != nil {
+			return nil, fmt.Errorf("malformed hook line %q: %w", line, err)
+		}
+		us = append(us, u)
 	}
 	return us, sc.Err()
 }

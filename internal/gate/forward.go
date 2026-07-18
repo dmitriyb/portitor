@@ -44,13 +44,27 @@ func Forward(repoDir string, updates []RefUpdate, cfg ForwardConfig) ([]ForwardR
 	if remote == "" {
 		remote = "upstream"
 	}
+	if !git.ValidRemoteName(remote) {
+		return nil, fmt.Errorf("invalid upstream remote name %q", remote)
+	}
 
 	var results []ForwardResult
 	for _, u := range updates {
+		// Only branch refs are ever forwarded. The gate refuses other namespaces
+		// before post-receive can see them; this is defense in depth.
+		if branch, ok := strings.CutPrefix(u.Ref, "refs/heads/"); !ok || branch == "" {
+			continue
+		}
 		if u.Ref == defRef || u.IsDelete() {
 			continue
 		}
-		out, err := git.Output(repoDir, "push", remote, u.NewSHA+":"+u.Ref)
+		// The refspec is built only from validated parts: a 40-hex SHA and a
+		// refs/heads/-prefixed ref (checked above) can never read as options.
+		if !ValidSHA(u.NewSHA) {
+			results = append(results, ForwardResult{Ref: u.Ref, Err: fmt.Errorf("malformed new object id %q", u.NewSHA)})
+			continue
+		}
+		out, err := git.OutputNetwork(repoDir, "push", "--", remote, u.NewSHA+":"+u.Ref)
 		results = append(results, ForwardResult{Ref: u.Ref, Err: err, Output: strings.TrimSpace(out)})
 	}
 	return results, nil
