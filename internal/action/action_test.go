@@ -77,13 +77,70 @@ func TestMergeAndClose(t *testing.T) {
 	}
 }
 
-func TestMergeApproved(t *testing.T) {
-	run, _ := stub("APPROVED\n", nil)
-	if ok, err := (GH{Repo: "o/r", Run: run}).MergeApproved(1); err != nil || !ok {
-		t.Fatalf("approved: ok=%v err=%v", ok, err)
+func TestFetchMergeState(t *testing.T) {
+	run, last := stub(`{"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN","headRefName":"feat","statusCheckRollup":[{"name":"ci/test","conclusion":"SUCCESS"}]}`, nil)
+	st, err := (GH{Repo: "o/r", Run: run}).FetchMergeState(5)
+	if err != nil {
+		t.Fatal(err)
 	}
-	run, _ = stub("REVIEW_REQUIRED\n", nil)
-	if ok, _ := (GH{Repo: "o/r", Run: run}).MergeApproved(1); ok {
-		t.Fatal("should not be approved")
+	if st.ReviewDecision != "APPROVED" || st.MergeStateStatus != "CLEAN" || st.HeadRefName != "feat" || len(st.StatusCheckRollup) != 1 {
+		t.Fatalf("state = %+v", st)
+	}
+	if got := strings.Join(*last, " "); !strings.Contains(got, "pr view 5") || !strings.Contains(got, "mergeStateStatus") {
+		t.Fatalf("args = %q", got)
+	}
+}
+
+// TestUnmetMergePreconditions pins the fail-closed evaluation: every
+// non-APPROVED decision (empty included) and every non-CLEAN state is unmet,
+// and required checks must be present AND successful.
+func TestUnmetMergePreconditions(t *testing.T) {
+	clean := MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN",
+		StatusCheckRollup: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
+
+	if unmet := UnmetMergePreconditions(clean, []string{"ci/test"}); len(unmet) != 0 {
+		t.Fatalf("clean state should merge: %v", unmet)
+	}
+	// Empty advisory list: checks not enforced.
+	if unmet := UnmetMergePreconditions(MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN"}, nil); len(unmet) != 0 {
+		t.Fatalf("advisory checks should not block: %v", unmet)
+	}
+	for _, decision := range []string{"", "REVIEW_REQUIRED", "CHANGES_REQUESTED"} {
+		st := clean
+		st.ReviewDecision = decision
+		if unmet := UnmetMergePreconditions(st, nil); len(unmet) == 0 {
+			t.Errorf("decision %q must be unmet", decision)
+		}
+	}
+	for _, state := range []string{"", "BEHIND", "DIRTY", "BLOCKED", "UNSTABLE", "UNKNOWN"} {
+		st := clean
+		st.MergeStateStatus = state
+		if unmet := UnmetMergePreconditions(st, nil); len(unmet) == 0 {
+			t.Errorf("merge state %q must be unmet", state)
+		}
+	}
+	// A required check that is missing, or present but failed, blocks.
+	if unmet := UnmetMergePreconditions(clean, []string{"ci/other"}); len(unmet) == 0 {
+		t.Error("missing required check must be unmet")
+	}
+	failed := clean
+	failed.StatusCheckRollup = []CheckRun{{Name: "ci/test", Conclusion: "FAILURE"}}
+	if unmet := UnmetMergePreconditions(failed, []string{"ci/test"}); len(unmet) == 0 {
+		t.Error("failed required check must be unmet")
+	}
+	// Legacy status contexts (context/state shape) also count.
+	legacy := clean
+	legacy.StatusCheckRollup = []CheckRun{{Context: "ci/legacy", State: "SUCCESS"}}
+	if unmet := UnmetMergePreconditions(legacy, []string{"ci/legacy"}); len(unmet) != 0 {
+		t.Errorf("legacy status context should satisfy: %v", unmet)
+	}
+	// Deny-wins across duplicate same-name entries: one green + one red = unmet.
+	dup := clean
+	dup.StatusCheckRollup = []CheckRun{
+		{Name: "ci/test", Conclusion: "SUCCESS"},
+		{Name: "ci/test", Conclusion: "FAILURE"},
+	}
+	if unmet := UnmetMergePreconditions(dup, []string{"ci/test"}); len(unmet) == 0 {
+		t.Error("a duplicate failing entry for a required check must be unmet")
 	}
 }

@@ -81,6 +81,26 @@ is passed at gate time. You write one JSON per repo and *associate* it once with
     "SHA256:cccc…": "merger"
   },
 
+  // Action policy: which roles may invoke each `portitor pr` verb. The verbs are
+  // a closed mechanism set; WHO may run each is yours to define — DEFAULT-DENY:
+  // an unlisted action (or an absent map) is refused for everyone.
+  "action_roles": {
+    "fetch":   ["implementer", "fixer", "reviewer", "merger", "owner"],
+    "comment": ["implementer", "fixer", "reviewer", "merger", "owner"],
+    "review":  ["reviewer", "owner"],
+    "merge":   ["merger", "owner"],
+    "close":   ["merger", "owner"]
+  },
+
+  // Check names that must be successful before a merge (matched against the
+  // PR's statusCheckRollup). Empty/absent = advisory (repos without CI yet).
+  "required_checks": ["ci/test"],
+
+  // Optional. Append-only JSONL decision trail (gate accept/reject, action
+  // allow/deny, auto-PR outcomes). Unset disables it; a write failure never
+  // changes a verdict (reported loudly instead).
+  "audit_log": "/srv/git/audit/yourrepo.jsonl",
+
   // Content rules: gate WHAT a role may change (see spec/gate/arch_content_rules.md).
   // Two families under one versioned schema — "version" must be exactly 1 for this
   // binary, and anything the binary does not fully understand refuses to gate.
@@ -138,19 +158,28 @@ via `roles` above; `allowed_signers` only establishes that the signature is trus
 
 ### Roles
 
-Roles are arbitrary strings you choose; the built-in action-API policy is below.
-It mirrors `RoleActions` in `internal/action/policy.go` — the single source of truth
-(`action.RoleCan`); keep this table in sync if you add an action.
+Roles are arbitrary strings you choose; portitor ships **no role names**. The
+action-API policy is your config's `action_roles` map (default-deny — see the
+schema above); the table there is the *recommended* layout:
 
-| action | allowed roles |
+| action | recommended roles |
 |---|---|
-| `fetch`, `comment` | any known role (implementer / fixer / reviewer / merger / owner) |
+| `fetch`, `comment` | every working role |
 | `review` (verdict) | `reviewer`, `owner` |
 | `merge`, `close` | `merger`, `owner` |
 
 `owner` is your own (touch-required) override identity. `merger` is a dedicated,
 **commit-less** landing identity — provision it only when you want merges via
-portitor; omit it and merges are simply unavailable through portitor.
+portitor; omit it (or grant nobody `merge`) and merges are simply unavailable
+through portitor.
+
+`merge` additionally re-derives its preconditions from GitHub + the local repo
+and refuses with the full unmet list: approval (`reviewDecision == APPROVED`),
+a `CLEAN` merge state (covers behind-base / conflicts / blocked), every
+`required_checks` entry green, and separation of duties (the requesting key
+must not have signed any commit the PR introduces — the same check guards
+`review --event approve`). The final `gh pr merge` remains the atomic gate;
+enable GitHub branch protection as defense in depth.
 
 Gate-side, `content_rules` enforce role→content (e.g. only `reviewer`/`owner` may
 move a record's `stage` to `approved`, and only they may delete/rename files under

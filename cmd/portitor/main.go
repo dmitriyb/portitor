@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/action"
+	"github.com/dmitriyb/portitor/internal/audit"
 	"github.com/dmitriyb/portitor/internal/config"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/git"
@@ -120,18 +121,24 @@ func repoDir() string {
 }
 
 // preReceive runs the gate; exit 0 accepts the push, non-zero rejects it.
+// Every decision (accept, reject, operational error — malformed stdin
+// included) lands in the audit trail; an audit write failure never changes the
+// verdict — it is reported loudly. The one inherently unauditable failure is a
+// config that cannot be loaded (no audit path is known then).
 func preReceive(r io.Reader, w io.Writer) int {
-	updates, err := parseUpdates(r)
-	if err != nil {
-		fmt.Fprintf(w, "portitor: %v\n", err)
-		return 1
-	}
 	s, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
+	updates, err := parseUpdates(r)
+	if err != nil {
+		auditGate(w, s, nil, nil, err)
+		fmt.Fprintf(w, "portitor: %v\n", err)
+		return 1
+	}
 	vs, err := gate.Check(repoDir(), updates, s.Config)
+	auditGate(w, s, updates, vs, err)
 	if err != nil {
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
@@ -144,6 +151,51 @@ func preReceive(r io.Reader, w io.Writer) int {
 		fmt.Fprintf(w, "  [%s] %s: %s\n", v.Rule, v.Ref, v.Detail)
 	}
 	return 1
+}
+
+// auditGate records one gate decision. The pusher fingerprint comes from the
+// environment the shell dispatcher exports; direct hook invocations without it
+// simply omit the attribution.
+func auditGate(w io.Writer, s config.Settings, updates []gate.RefUpdate, vs []gate.Violation, checkErr error) {
+	refs := make([]string, 0, len(updates))
+	for _, u := range updates {
+		refs = append(refs, u.Ref)
+	}
+	fp := os.Getenv("PORTITOR_FINGERPRINT")
+	e := audit.Event{
+		Kind:        "gate",
+		Repo:        repoName(),
+		Fingerprint: fp,
+		Role:        s.Roles[fp],
+		Refs:        refs,
+	}
+	switch {
+	case checkErr != nil:
+		e.Verdict = "error"
+		e.Reason = checkErr.Error()
+	case len(vs) > 0:
+		e.Verdict = "reject"
+		parts := make([]string, 0, len(vs))
+		for _, v := range vs {
+			parts = append(parts, fmt.Sprintf("[%s] %s: %s", v.Rule, v.Ref, v.Detail))
+		}
+		e.Reason = strings.Join(parts, "; ")
+	default:
+		e.Verdict = "accept"
+	}
+	if err := audit.Append(s.AuditLog, e); err != nil {
+		fmt.Fprintf(w, "portitor: audit: %v\n", err)
+	}
+}
+
+// repoName derives the repo's name from the receiving repo dir (best-effort,
+// audit attribution only).
+func repoName() string {
+	dir := repoDir()
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	return strings.TrimSuffix(filepath.Base(dir), ".git")
 }
 
 // postReceive forwards accepted feature refs upstream, then auto-opens a PR for
@@ -164,7 +216,16 @@ func postReceive(r io.Reader, w io.Writer) int {
 		UpstreamRemote: s.UpstreamRemote,
 		DefaultBranch:  def,
 	})
+	fp := os.Getenv("PORTITOR_FINGERPRINT")
+	auditEvent := func(w io.Writer, e audit.Event) {
+		e.Repo = repoName()
+		e.Fingerprint = fp
+		if aerr := audit.Append(s.AuditLog, e); aerr != nil {
+			fmt.Fprintf(w, "portitor: audit: %v\n", aerr)
+		}
+	}
 	if err != nil {
+		auditEvent(w, audit.Event{Kind: "forward", Verdict: "error", Reason: err.Error()})
 		fmt.Fprintf(w, "portitor: %v\n", err)
 		return 1
 	}
@@ -173,15 +234,25 @@ func postReceive(r io.Reader, w io.Writer) int {
 	for _, res := range results {
 		if res.Err != nil {
 			fmt.Fprintf(w, "portitor: forward %s -> upstream FAILED: %v\n", res.Ref, res.Err)
+			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "error", Reason: res.Err.Error()})
 			rc = 1
 			continue
 		}
 		fmt.Fprintf(w, "portitor: forwarded %s -> upstream\n", res.Ref)
-		if n, url, err := autoOpenPR(repoDir(), def, res.Ref, gh); err != nil {
+		auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "allow"})
+		n, url, err := autoOpenPR(repoDir(), def, res.Ref, gh)
+		ev := audit.Event{Kind: "auto-pr", Refs: []string{res.Ref}, PR: n}
+		if err != nil {
 			fmt.Fprintf(w, "portitor: PR for %s: %v\n", res.Ref, err)
-		} else if n > 0 {
-			fmt.Fprintf(w, "portitor: PR #%d %s\n", n, url)
+			ev.Verdict = "error"
+			ev.Reason = err.Error()
+		} else {
+			if n > 0 {
+				fmt.Fprintf(w, "portitor: PR #%d %s\n", n, url)
+			}
+			ev.Verdict = "allow"
 		}
+		auditEvent(w, ev)
 	}
 	return rc
 }
@@ -214,12 +285,22 @@ func autoOpenPR(dir, def, ref string, gh action.GH) (int, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	return gh.OpenPR(branch, def, strings.TrimSpace(title), strings.TrimSpace(body))
+	n, url, err := gh.OpenPR(branch, def, strings.TrimSpace(title), strings.TrimSpace(body))
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "already exists") {
+		// Check-then-act race against live GitHub: another forward created the
+		// PR between our query and the create. That is the idempotent-success
+		// case, not an error — re-derive the number.
+		if n2, err2 := gh.OpenPRNumber(branch); err2 == nil && n2 > 0 {
+			return n2, fmt.Sprintf("(existing PR #%d)", n2), nil
+		}
+	}
+	return n, url, err
 }
 
 // ---- pr action handler (role-validated) ----
-// The role→action policy lives in internal/action (action.RoleCan), the single
-// source of truth shared with the README table.
+// The action verbs are a closed mechanism set (action.Verbs); WHO may perform
+// each is the per-repo config's action_roles map, default-deny. Every decision
+// is appended to the audit trail.
 
 func prCommand(fp string, args []string) int {
 	if len(args) < 1 {
@@ -234,7 +315,7 @@ func prCommand(fp string, args []string) int {
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if act != "comment" && act != "review" && act != "merge" && act != "close" && act != "fetch" {
+	if !action.KnownVerb(act) {
 		fmt.Fprintf(os.Stderr, "portitor pr: unknown action %q\n", act)
 		return 2
 	}
@@ -255,58 +336,128 @@ func prCommand(fp string, args []string) int {
 		return 1
 	}
 	role := s.Roles[fp]
-	if role == "" {
-		fmt.Fprintf(os.Stderr, "portitor pr: key has no role for repo %q\n", *repo)
+
+	auditDecision := func(verdict, reason string) {
+		e := audit.Event{Kind: "action", Repo: *repo, Fingerprint: fp, Role: role,
+			Action: act, PR: *pr, Verdict: verdict, Reason: reason}
+		if aerr := audit.Append(s.AuditLog, e); aerr != nil {
+			fmt.Fprintf(os.Stderr, "portitor pr: audit: %v\n", aerr)
+		}
+	}
+	deny := func(reason string) int {
+		auditDecision("deny", reason)
+		fmt.Fprintf(os.Stderr, "portitor pr: %s\n", reason)
 		return 1
 	}
-	if !action.RoleCan(role, act) {
-		fmt.Fprintf(os.Stderr, "portitor pr: role %q may not %q\n", role, act)
+	fail := func(err error) int {
+		auditDecision("error", err.Error())
+		fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
 		return 1
+	}
+
+	if role == "" {
+		return deny(fmt.Sprintf("key has no role for repo %q", *repo))
+	}
+	if !action.RoleCan(s.ActionRoles, role, act) {
+		return deny(fmt.Sprintf("role %q may not %q (action_roles is default-deny)", role, act))
 	}
 	gh := ghClient(s)
 	if gh.Repo == "" {
-		fmt.Fprintf(os.Stderr, "portitor pr: no upstream slug configured for repo %q\n", *repo)
-		return 1
+		return fail(fmt.Errorf("no upstream slug configured for repo %q", *repo))
 	}
 	switch act {
 	case "fetch":
 		out, err := gh.Fetch(*pr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
 		fmt.Print(out)
 	case "comment":
 		if err := gh.Comment(*pr, readBody()); err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
 	case "review":
+		if *event == "approve" {
+			// Separation of duties: an approval must not come from a key that
+			// signed the PR's own commits.
+			signed, err := requesterSignedPR(s, *repo, fp, *pr, gh)
+			if err != nil {
+				return fail(fmt.Errorf("separation-of-duties check: %w", err))
+			}
+			if signed {
+				return deny(fmt.Sprintf("separation of duties: key %s signed commits this PR introduces; it may not approve", fp))
+			}
+		}
 		if err := gh.Review(*pr, *event, readBody()); err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
 	case "merge":
-		ok, err := gh.MergeApproved(*pr)
+		st, err := gh.FetchMergeState(*pr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
-		if !ok {
-			fmt.Fprintf(os.Stderr, "portitor pr: PR #%d is not approved; refusing to merge\n", *pr)
-			return 1
+		unmet := action.UnmetMergePreconditions(st, s.RequiredChecks)
+		signed, err := requesterSignedHead(s, *repo, fp, st.HeadRefName)
+		if err != nil {
+			return fail(fmt.Errorf("separation-of-duties check: %w", err))
 		}
+		if signed {
+			unmet = append(unmet, fmt.Sprintf("separation of duties: key %s signed commits this PR introduces", fp))
+		}
+		if len(unmet) > 0 {
+			return deny(fmt.Sprintf("PR #%d does not meet the merge preconditions: %s", *pr, strings.Join(unmet, "; ")))
+		}
+		// The final gh merge is the atomic gate: GitHub re-checks, so a state
+		// change since the query fails there (TOCTOU closed GitHub-side).
 		if err := gh.Merge(*pr); err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
 	case "close":
 		if err := gh.ClosePR(*pr); err != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
-			return 1
+			return fail(err)
 		}
 	}
+	auditDecision("allow", "")
 	return 0
+}
+
+// requesterSignedPR resolves the PR's head ref, then defers to
+// requesterSignedHead.
+func requesterSignedPR(s config.Settings, repo, fp string, pr int, gh action.GH) (bool, error) {
+	st, err := gh.FetchMergeState(pr)
+	if err != nil {
+		return false, err
+	}
+	return requesterSignedHead(s, repo, fp, st.HeadRefName)
+}
+
+// requesterSignedHead reports whether the requesting key signed any commit the
+// PR introduces (default..head), verified against the LOCAL gated repo with
+// the gate's own hermetic verification. Fail-closed: a head ref portitor does
+// not have locally, or any verification failure, is an error the caller
+// refuses on.
+func requesterSignedHead(s config.Settings, repo, fp, headRef string) (bool, error) {
+	if headRef == "" {
+		return false, errors.New("PR head ref is empty")
+	}
+	tip := "refs/heads/" + headRef
+	if !gate.ValidRef(tip) {
+		return false, fmt.Errorf("implausible PR head ref %q", headRef)
+	}
+	bare := filepath.Join(config.ReposRoot(), repo+".git")
+	def := s.DefaultBranch
+	if def == "" {
+		d, err := defaultBranchName(bare)
+		if err != nil {
+			return false, err
+		}
+		def = d
+	}
+	fps, err := gate.SignerFingerprints(bare, "refs/heads/"+def, tip, s.AllowedSigners)
+	if err != nil {
+		return false, err
+	}
+	return fps[fp], nil
 }
 
 // readBody reads the action body (comment/review text) from stdin, so multi-line
@@ -344,6 +495,9 @@ func shellCommand(args []string) int {
 		}
 		cmd := exec.Command(rest[0], rest[1])
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		// The hooks inherit the caller's key fingerprint so the audit trail
+		// can attribute the push to the connecting identity.
+		cmd.Env = append(os.Environ(), "PORTITOR_FINGERPRINT="+fp)
 		if err := cmd.Run(); err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
@@ -380,7 +534,9 @@ func classify(orig string) (string, []string, error) {
 		return "reject", nil, errors.New("empty command")
 	}
 	switch toks[0] {
-	case "git-receive-pack", "git-upload-pack", "git-upload-archive":
+	// A closed table: exactly the two pack commands. git-upload-archive is
+	// deliberately absent — no supported flow needs archives.
+	case "git-receive-pack", "git-upload-pack":
 		if len(toks) != 2 {
 			return "reject", nil, errors.New("malformed git command")
 		}

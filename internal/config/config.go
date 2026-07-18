@@ -9,16 +9,27 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/rules"
 )
 
 // Settings is portitor's per-repo configuration: gate checks + forwarding + the
-// upstream slug the action API targets.
+// upstream slug the action API targets + the action policy and audit trail.
 type Settings struct {
 	gate.Config
 	UpstreamRemote string `json:"upstream_remote"`
 	UpstreamSlug   string `json:"upstream_slug"` // owner/name for gh; else derived from the upstream remote URL
+	// ActionRoles maps each action verb (the closed set fetch|comment|review|
+	// merge|close) to the roles allowed to invoke it. Default-deny: an action
+	// not listed — or a nil map — is refused for everyone.
+	ActionRoles map[string][]string `json:"action_roles"`
+	// RequiredChecks lists check names that must be successful before a merge.
+	// Empty = advisory (deliberate: repos without CI yet).
+	RequiredChecks []string `json:"required_checks"`
+	// AuditLog, when set, receives one JSON line per gate/action decision.
+	// Empty disables the trail. Write failures never change a verdict.
+	AuditLog string `json:"audit_log"`
 }
 
 // ReposDir is the registry holding one <repo>.json per managed repo. init-repo points
@@ -123,6 +134,11 @@ func Validate(s Settings) []string {
 	}
 	if len(s.RetiredRoleRules) > 0 {
 		problems = append(problems, "role_rules is retired; migrate to content_rules (see spec/gate/arch_content_rules.md)")
+	}
+	for verb := range s.ActionRoles {
+		if !action.KnownVerb(verb) {
+			problems = append(problems, fmt.Sprintf("action_roles: unknown action %q (known: %v)", verb, action.Verbs))
+		}
 	}
 	_, ruleProblems := rules.Compile(s.Content)
 	problems = append(problems, ruleProblems...)

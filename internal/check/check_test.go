@@ -49,7 +49,7 @@ func TestRecordsViaInputFile(t *testing.T) {
 
 func TestRecordsViaStdin(t *testing.T) {
 	requireSh(t)
-	s := script(t, "exec cat\n") // echo stdin back: content is the envelope
+	s := script(t, "exec cat\n")                // echo stdin back: content is the envelope
 	def := rules.CheckDef{Command: []string{s}} // no records_path: output IS the array
 	recs, err := Records(def, []byte(`[{"id":"a"},{"id":"b"}]`))
 	if err != nil {

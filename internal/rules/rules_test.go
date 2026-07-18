@@ -67,9 +67,9 @@ func TestCompileValidation(t *testing.T) {
 
 func TestMatcherDecodeStrict(t *testing.T) {
 	bad := []string{
-		`{"type":"regex","pattern":"x"}`,          // unknown type
-		`{"type":"field","field":"x","glob":"*"}`, // unknown key for type
-		`{"field":"x","to":"v"}`,                  // missing type
+		`{"type":"regex","pattern":"x"}`,               // unknown type
+		`{"type":"field","field":"x","glob":"*"}`,      // unknown key for type
+		`{"field":"x","to":"v"}`,                       // missing type
 		`{"type":"field","field":"x","changed":false}`, // changed must be true
 	}
 	for _, b := range bad {

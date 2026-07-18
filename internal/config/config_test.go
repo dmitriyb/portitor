@@ -84,4 +84,14 @@ func TestValidate(t *testing.T) {
 	if p := Validate(badRules); len(p) == 0 {
 		t.Fatal("an unsupported content_rules version should be invalid")
 	}
+	badVerb := good
+	badVerb.ActionRoles = map[string][]string{"deploy": {"owner"}}
+	if p := Validate(badVerb); len(p) == 0 {
+		t.Fatal("an unknown action verb in action_roles should be invalid")
+	}
+	okVerbs := good
+	okVerbs.ActionRoles = map[string][]string{"merge": {"merger"}, "fetch": {"implementer"}}
+	if p := Validate(okVerbs); len(p) != 0 {
+		t.Fatalf("known verbs should validate: %v", p)
+	}
 }

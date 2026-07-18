@@ -138,13 +138,13 @@ func TestRefUpdateValidate(t *testing.T) {
 		}
 	}
 	invalid := []RefUpdate{
-		{OldSHA: sha[:39], NewSHA: sha, Ref: "refs/heads/x"},                    // short SHA
+		{OldSHA: sha[:39], NewSHA: sha, Ref: "refs/heads/x"},                                   // short SHA
 		{OldSHA: sha, NewSHA: "0123456789ABCDEF0123456789abcdef01234567", Ref: "refs/heads/x"}, // uppercase
-		{OldSHA: sha, NewSHA: sha + "0", Ref: "refs/heads/x"},                   // long SHA
-		{OldSHA: sha, NewSHA: sha, Ref: "heads/x"},                              // no refs/ prefix
-		{OldSHA: sha, NewSHA: sha, Ref: "refs/"},                                // empty remainder
-		{OldSHA: sha, NewSHA: sha, Ref: "refs/heads/a\x01b"},                    // control byte
-		{OldSHA: "", NewSHA: sha, Ref: "refs/heads/x"},                          // empty SHA
+		{OldSHA: sha, NewSHA: sha + "0", Ref: "refs/heads/x"},                                  // long SHA
+		{OldSHA: sha, NewSHA: sha, Ref: "heads/x"},                                             // no refs/ prefix
+		{OldSHA: sha, NewSHA: sha, Ref: "refs/"},                                               // empty remainder
+		{OldSHA: sha, NewSHA: sha, Ref: "refs/heads/a\x01b"},                                   // control byte
+		{OldSHA: "", NewSHA: sha, Ref: "refs/heads/x"},                                         // empty SHA
 	}
 	for _, u := range invalid {
 		if err := u.Validate(); err == nil {

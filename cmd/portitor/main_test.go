@@ -78,11 +78,11 @@ func TestParseUpdates(t *testing.T) {
 	})
 
 	bad := []string{
-		sha + " " + sha,                              // two fields
-		sha[:12] + " " + sha + " refs/heads/x",       // short SHA
-		sha + " not-a-sha refs/heads/x",              // garbage SHA
-		sha + " " + sha + " heads/x",                 // no refs/ prefix
-		sha + " " + sha + " refs/heads/a\x01b",       // control byte in ref
+		sha + " " + sha,                        // two fields
+		sha[:12] + " " + sha + " refs/heads/x", // short SHA
+		sha + " not-a-sha refs/heads/x",        // garbage SHA
+		sha + " " + sha + " heads/x",           // no refs/ prefix
+		sha + " " + sha + " refs/heads/a\x01b", // control byte in ref
 	}
 	for _, line := range bad {
 		t.Run("rejects "+line, func(t *testing.T) {
@@ -102,6 +102,7 @@ func TestClassify(t *testing.T) {
 	}{
 		{"git-receive-pack '/srv/git/repo.git'", "git", []string{"git-receive-pack", "/srv/git/repo.git"}, true},
 		{"git-upload-pack '/srv/git/repo.git'", "git", []string{"git-upload-pack", "/srv/git/repo.git"}, true},
+		{"git-upload-archive '/srv/git/repo.git'", "reject", nil, false}, // deliberately outside the closed table
 		{"portitor pr comment --pr 5", "pr", []string{"comment", "--pr", "5"}, true},
 		{"portitor pr fetch --pr 7", "pr", []string{"fetch", "--pr", "7"}, true},
 		{"portitor shell deadbeef", "reject", nil, false},
@@ -127,7 +128,7 @@ func TestClassify(t *testing.T) {
 }
 
 func TestRoleCan(t *testing.T) {
-	allow := map[string][]string{
+	policy := map[string][]string{
 		"comment": {"implementer", "fixer", "reviewer", "merger", "owner"},
 		"fetch":   {"implementer", "fixer", "reviewer", "merger", "owner"},
 		"review":  {"reviewer", "owner"},
@@ -135,21 +136,28 @@ func TestRoleCan(t *testing.T) {
 		"close":   {"merger", "owner"},
 	}
 	allRoles := []string{"implementer", "fixer", "reviewer", "merger", "owner", "", "bogus"}
-	for act, allowed := range allow {
+	for act, allowed := range policy {
 		for _, role := range allRoles {
-			want := contains(allowed, role)
-			if got := action.RoleCan(role, act); got != want {
-				t.Errorf("action.RoleCan(%q,%q)=%v want %v", role, act, got, want)
+			want := role != "" && contains(allowed, role)
+			if got := action.RoleCan(policy, role, act); got != want {
+				t.Errorf("RoleCan(policy,%q,%q)=%v want %v", role, act, got, want)
 			}
 		}
 	}
-	// implementer must NOT review/merge/close (the teeth of the model)
+	// implementer must NOT review/merge/close under this policy (the teeth).
 	for _, act := range []string{"review", "merge", "close"} {
-		if action.RoleCan("implementer", act) {
+		if action.RoleCan(policy, "implementer", act) {
 			t.Errorf("implementer should not be able to %q", act)
 		}
 	}
-	if action.RoleCan("anything", "unknown-action") {
+	// Default-deny: nil map, missing verb, unknown verb — all refused.
+	if action.RoleCan(nil, "owner", "merge") {
+		t.Error("nil action_roles must deny everything")
+	}
+	if action.RoleCan(map[string][]string{"fetch": {"owner"}}, "owner", "merge") {
+		t.Error("an unlisted action must be denied")
+	}
+	if action.RoleCan(policy, "anything", "unknown-action") {
 		t.Error("unknown action must be denied")
 	}
 }

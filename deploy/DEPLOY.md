@@ -32,6 +32,14 @@ jq -n --arg i "$i" --arg v "$v" --arg m "$m" '{
   default_branch:"main", allowed_signers:"/etc/portitor/allowed_signers", upstream_remote:"upstream",
   upstream_slug:"dmitriyb/dca-sandbox",
   roles: {($i):"implementer", ($v):"reviewer", ($m):"merger"},
+  action_roles: {
+    fetch:   ["implementer","reviewer","merger","owner"],
+    comment: ["implementer","reviewer","merger","owner"],
+    review:  ["reviewer","owner"],
+    merge:   ["merger","owner"],
+    close:   ["merger","owner"]
+  },
+  audit_log: "/srv/git/audit/dca-sandbox.jsonl",
   content_rules: {
     version: 1,
     structural: {rules: [{name:"beads-file-reviewer-only", paths:[".beads/**"],
