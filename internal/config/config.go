@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"github.com/dmitriyb/portitor/internal/gate"
+	"github.com/dmitriyb/portitor/internal/rules"
 )
 
 // Settings is portitor's per-repo configuration: gate checks + forwarding + the
@@ -106,8 +106,8 @@ func readInto(path string, s *Settings) error {
 }
 
 // Validate returns the problems with a config (empty slice = valid): the gate-integrity
-// fields must be present, allowed_signers must be readable, roles must be non-empty, and
-// every role rule's regex must compile + name an allowed role.
+// fields must be present, allowed_signers must be readable, roles must be non-empty, the
+// retired role_rules key must be absent, and content_rules must compile cleanly.
 func Validate(s Settings) []string {
 	var problems []string
 	if s.DefaultBranch == "" {
@@ -121,15 +121,10 @@ func Validate(s Settings) []string {
 	if len(s.Roles) == 0 {
 		problems = append(problems, "roles map is empty (no signer could ever be authorized)")
 	}
-	for _, r := range s.RoleRules {
-		if r.AddedRegex != "" {
-			if _, err := regexp.Compile(r.AddedRegex); err != nil {
-				problems = append(problems, fmt.Sprintf("role_rule %q: bad added_regex: %v", r.Name, err))
-			}
-		}
-		if len(r.AllowedRoles) == 0 {
-			problems = append(problems, fmt.Sprintf("role_rule %q: allowed_roles is empty", r.Name))
-		}
+	if len(s.RetiredRoleRules) > 0 {
+		problems = append(problems, "role_rules is retired; migrate to content_rules (see spec/gate/arch_content_rules.md)")
 	}
+	_, ruleProblems := rules.Compile(s.Content)
+	problems = append(problems, ruleProblems...)
 	return problems
 }

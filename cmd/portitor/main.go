@@ -23,6 +23,7 @@ import (
 	"github.com/dmitriyb/portitor/internal/config"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/git"
+	"github.com/dmitriyb/portitor/internal/rules"
 )
 
 func main() {
@@ -47,6 +48,10 @@ func main() {
 		os.Exit(validateConfig(os.Args[2:]))
 	case "pr":
 		os.Exit(prCommand(os.Getenv("PORTITOR_FINGERPRINT"), os.Args[2:]))
+	case "internal-check-exec":
+		// Not part of the CLI surface: the rlimit trampoline internal/check
+		// re-execs through. The SSH shell dispatcher cannot route here.
+		os.Exit(internalCheckExec(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "portitor: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -85,8 +90,26 @@ func validateConfig(args []string) int {
 		}
 		return 1
 	}
-	fmt.Printf("validate-config: %s OK (%d role(s), %d rule(s))\n", *cfgPath, len(s.Roles), len(s.RoleRules))
+	fmt.Printf("validate-config: %s OK (%d role(s)%s)\n", *cfgPath, len(s.Roles), contentSummary(s.Content))
 	return 0
+}
+
+// contentSummary renders a short content-rules count for the OK line.
+func contentSummary(cr *rules.ContentRules) string {
+	if cr == nil {
+		return ", no content rules"
+	}
+	structural := 0
+	if cr.Structural != nil {
+		structural = len(cr.Structural.Rules)
+	}
+	semantic := 0
+	if cr.Semantic != nil {
+		for _, f := range cr.Semantic.Files {
+			semantic += len(f.Rules)
+		}
+	}
+	return fmt.Sprintf(", %d structural + %d semantic rule(s)", structural, semantic)
 }
 
 func repoDir() string {

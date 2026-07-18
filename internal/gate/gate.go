@@ -8,14 +8,14 @@
 package gate
 
 import (
-	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/git"
+	"github.com/dmitriyb/portitor/internal/rules"
 )
 
 // zeroSHA is git's all-zero object id, used for branch create (old) and delete (new).
@@ -87,17 +87,6 @@ func ValidRef(s string) bool {
 	return true
 }
 
-// RoleRule requires that any introduced commit whose diff to PathGlob adds a line
-// matching AddedRegex be signed by a signer whose role is in AllowedRoles. It lets
-// generic portitor enforce domain rules (e.g. "only reviewer/owner may close a
-// bead") from config, without built-in knowledge of beads/spex.
-type RoleRule struct {
-	Name         string   `json:"name"`          // stable identifier, surfaced as the violation rule
-	PathGlob     string   `json:"path_glob"`     // git pathspec the commit's diff must touch
-	AddedRegex   string   `json:"added_regex"`   // regex; matched against ADDED lines in that path's diff
-	AllowedRoles []string `json:"allowed_roles"` // the signer's role must be one of these
-}
-
 // Config controls the checks.
 type Config struct {
 	// DefaultBranch is the protected branch (e.g. "main"). If empty, it is derived
@@ -110,8 +99,14 @@ type Config struct {
 	// Roles maps a signer key fingerprint (as git reports it via %GF, e.g.
 	// "SHA256:...") to a role name. Unmapped signers have the empty role.
 	Roles map[string]string `json:"roles"`
-	// RoleRules are evaluated against every introduced commit.
-	RoleRules []RoleRule `json:"role_rules"`
+	// Content configures the content-protection rule families (structural
+	// file-operation rules + semantic record-transition rules). See
+	// spec/gate/arch_content_rules.md.
+	Content *rules.ContentRules `json:"content_rules"`
+	// RetiredRoleRules is a sentinel for the retired role_rules key: a config
+	// still carrying it refuses to gate with a migration message — the old
+	// rules are never silently dropped.
+	RetiredRoleRules json.RawMessage `json:"role_rules"`
 	// RequireUpToDateWithDefault, when true, rejects a feature-branch update whose
 	// tip does not contain the current default-branch tip (i.e. it is based on a
 	// stale default). The deterministic start-task wrapper branches from the current
@@ -143,10 +138,16 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 	}
 	defRef := "refs/heads/" + def
 
-	rules, err := compileRules(cfg.RoleRules)
-	if err != nil {
-		return nil, err
+	if len(cfg.RetiredRoleRules) > 0 {
+		return nil, fmt.Errorf("config carries the retired role_rules key; migrate to content_rules (see spec/gate/arch_content_rules.md)")
 	}
+	comp, problems := rules.Compile(cfg.Content)
+	if len(problems) > 0 {
+		return nil, fmt.Errorf("invalid content_rules: %s", strings.Join(problems, "; "))
+	}
+	// Extracted record sets, shared across commits within this push (a blob
+	// unchanged between a commit and its child parses once).
+	recCache := map[string]map[string]rules.Record{}
 
 	var vs []Violation
 	for _, u := range updates {
@@ -217,50 +218,17 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 			}
 
 			// Rule(s): role-gated content. The signer's role comes from its key
-			// fingerprint (a credential, not a forgeable label). Cache the per-pathglob
-			// diff for THIS commit so rules sharing a path don't re-shell git (the diff
-			// for a given pathglob is identical regardless of which rule asked).
+			// fingerprint (a credential, not a forgeable label); the structural +
+			// semantic rule families evaluate this commit's changes against it.
 			role := cfg.Roles[fp]
-			diffCache := map[string]string{}
-			for _, r := range rules {
-				diff, ok := diffCache[r.PathGlob]
-				if !ok {
-					d, err := git.OutputHermetic(repoDir, "show", "--format=", "--unified=0", c, "--", r.PathGlob)
-					if err != nil {
-						return nil, err
-					}
-					diff = d
-					diffCache[r.PathGlob] = d
-				}
-				if diffAddsMatch(diff, r.re) && !contains(r.AllowedRoles, role) {
-					vs = append(vs, Violation{
-						Ref:    u.Ref,
-						Rule:   r.Name,
-						Detail: fmt.Sprintf("commit %s requires signer role in %v, but the signer's role is %s", shortSHA(c), r.AllowedRoles, roleLabel(role)),
-					})
-				}
+			cvs, err := contentViolations(repoDir, u.Ref, c, role, comp, recCache)
+			if err != nil {
+				return nil, err
 			}
+			vs = append(vs, cvs...)
 		}
 	}
 	return vs, nil
-}
-
-// compiledRule is a RoleRule with its regex pre-compiled.
-type compiledRule struct {
-	RoleRule
-	re *regexp.Regexp
-}
-
-func compileRules(rules []RoleRule) ([]compiledRule, error) {
-	out := make([]compiledRule, 0, len(rules))
-	for _, r := range rules {
-		re, err := regexp.Compile(r.AddedRegex)
-		if err != nil {
-			return nil, fmt.Errorf("role rule %q: bad AddedRegex: %w", r.Name, err)
-		}
-		out = append(out, compiledRule{RoleRule: r, re: re})
-	}
-	return out, nil
 }
 
 // defaultBranch reads the repo's HEAD symref (e.g. "main").
@@ -317,23 +285,6 @@ func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer
 		lines = append(lines, "")
 	}
 	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2]), nil
-}
-
-// diffAddsMatch reports whether a unified diff adds (a "+" line, not the "+++"
-// file header) a line matching re. Pure — the diff is produced by git with the
-// rule's pathspec applied, so path filtering keeps git's exact semantics.
-func diffAddsMatch(diff string, re *regexp.Regexp) bool {
-	sc := bufio.NewScanner(strings.NewReader(diff))
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // tolerate long diff lines
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			if re.MatchString(line) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // staleBase reports whether newSHA fails to contain the current default-branch tip

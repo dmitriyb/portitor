@@ -362,7 +362,7 @@ func TestAddRole_OverwriteToMergerTrusted(t *testing.T) {
 	}
 }
 
-// 18. an overwrite preserves every non-roles field's value (role_rules, upstream_*).
+// 18. an overwrite preserves every non-roles field's value (content_rules, upstream_*).
 func TestAddRole_PreservesOtherFields(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PORTITOR_REPOS_DIR", dir)
@@ -371,10 +371,10 @@ func TestAddRole_PreservesOtherFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := filepath.Join(dir, "myrepo.json")
-	const roleRules = `[{"name":"protect-gate","added_regex":"^gate","allowed_roles":["reviewer"]}]`
+	const contentRules = `{"version":1,"structural":{"rules":[{"name":"protect-gate","paths":["gate/**"],"operations":["delete"],"roles":{"not_in":["reviewer"]},"effect":"deny"}]}}`
 	body := `{"default_branch":"main","allowed_signers":"` + signers + `",` +
 		`"upstream_remote":"origin","upstream_slug":"acme/widgets",` +
-		`"role_rules":` + roleRules + `,` +
+		`"content_rules":` + contentRules + `,` +
 		`"roles":{"` + goodFP + `":"reviewer"}}`
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -395,12 +395,11 @@ func TestAddRole_PreservesOtherFields(t *testing.T) {
 	if s.DefaultBranch != "main" || s.AllowedSigners != signers {
 		t.Fatalf("gate fields changed: %+v", s)
 	}
-	if len(s.RoleRules) != 1 || s.RoleRules[0].Name != "protect-gate" ||
-		s.RoleRules[0].AddedRegex != "^gate" ||
-		len(s.RoleRules[0].AllowedRoles) != 1 || s.RoleRules[0].AllowedRoles[0] != "reviewer" {
-		t.Fatalf("role_rules not preserved: %+v", s.RoleRules)
+	if s.Content == nil || s.Content.Structural == nil || len(s.Content.Structural.Rules) != 1 ||
+		s.Content.Structural.Rules[0].Name != "protect-gate" {
+		t.Fatalf("content_rules not preserved: %+v", s.Content)
 	}
-	// The role_rules value is byte-identical (RawMessage round-trip), even though
+	// The content_rules value is byte-identical (RawMessage round-trip), even though
 	// top-level key order/whitespace may differ.
 	raw, _ := os.ReadFile(cfg)
 	var obj map[string]json.RawMessage
@@ -408,10 +407,10 @@ func TestAddRole_PreservesOtherFields(t *testing.T) {
 		t.Fatalf("reparse: %v", err)
 	}
 	var got, want interface{}
-	_ = json.Unmarshal(obj["role_rules"], &got)
-	_ = json.Unmarshal([]byte(roleRules), &want)
+	_ = json.Unmarshal(obj["content_rules"], &got)
+	_ = json.Unmarshal([]byte(contentRules), &want)
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("role_rules value drifted: got %s", obj["role_rules"])
+		t.Fatalf("content_rules value drifted: got %s", obj["content_rules"])
 	}
 }
 

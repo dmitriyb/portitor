@@ -24,19 +24,25 @@ rules.
    pushed and its ref deleted on the bare side (objects remain, ref gone); a signed new branch →
    zero violations.
 
-## Role rules (`role_test.go`)
+## Content rules (`role_test.go`, `content_test.go`)
 
 Two identities (implementer + reviewer keys, each in `allowed_signers`), `Roles` mapping each key
-fingerprint to a role, and a `bead-close-requires-review` rule (path `.beads/issues.jsonl`, added
-regex `"status":"closed"`, roles `[reviewer, owner]`):
+fingerprint to a role, and generic content rules (see `arch_content_rules.md`): a semantic rule
+gating a record field's arrival at a protected value (roles `[reviewer, owner]`), backed by a
+**test-authored check command** (a trivial script — proving the seam takes any filler), plus
+structural rules gating delete/rename of a protected path:
 
-6. **implementer closes a bead** (commit adds the closed line, signed by the implementer key) →
-   violation, rule `bead-close-requires-review`.
-7. **reviewer closes the same bead** → zero violations.
-8. **implementer makes a non-close change** (no diff to `.beads/issues.jsonl`) → zero violations.
+6. **implementer moves the gated field to the protected value** (signed by the implementer key)
+   → violation named by the rule.
+7. **reviewer makes the same transition** → zero violations.
+8. **implementer changes an unrelated file / an unnamed field** → zero violations.
+9. **structural**: implementer deletes or renames a protected file → violation; reviewer → none.
+10. **check-command failure**: content the check command rejects (non-zero exit) → violation on
+    either side of the delta; a command that cannot run at all → operational error. Both reject.
 
 These confirm role attribution is by signing **key** (the implementer can't masquerade as reviewer
-without the reviewer key), and that the content rule keys off the diff, not the actor's claim.
+without the reviewer key), that verdicts come from extracted record deltas and name-status facts
+(never portitor-side format parsing), and that the check seam is fail-closed regardless of filler.
 
 ## End-to-end (real push)
 

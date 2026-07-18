@@ -81,22 +81,46 @@ is passed at gate time. You write one JSON per repo and *associate* it once with
     "SHA256:cccc…": "merger"
   },
 
-  // Content rules: gate WHAT a role may change. For each introduced commit, if its
-  // diff to path_glob ADDS a line matching added_regex, the signer's role must be
-  // in allowed_roles — else the push is rejected with violation `name`.
-  "role_rules": [
-    {
-      "name": "bead-close-reviewer-only",
-      "path_glob": ".beads/issues.jsonl",
-      "added_regex": "\"status\"\\s*:\\s*\"closed\"",
-      "allowed_roles": ["reviewer", "owner"]
+  // Content rules: gate WHAT a role may change (see spec/gate/arch_content_rules.md).
+  // Two families under one versioned schema — "version" must be exactly 1 for this
+  // binary, and anything the binary does not fully understand refuses to gate.
+  "content_rules": {
+    "version": 1,
+
+    // Structural: file-level operations (add|modify|delete|rename) × path glob × role.
+    // First matching rule decides; else the first matching per-path default; else allow.
+    "structural": {
+      "rules": [
+        { "name": "registry-ops-reviewer-only",
+          "paths": ["registry/**"], "operations": ["delete", "rename"],
+          "roles": {"not_in": ["reviewer", "owner"]}, "effect": "deny" }
+      ],
+      "defaults": []
+    },
+
+    // Semantic: record transitions inside a protected structured file. portitor never
+    // parses the format itself — YOUR check command (any script/tool wrapper) extracts
+    // the records; portitor evaluates generic field-transition rules over the delta.
+    "semantic": {
+      "files": [
+        { "path": "registry/records.jsonl",
+          "check": {
+            "command": ["/usr/local/bin/records-list", "--json"],  // explicit argv, no shell
+            "input_file": "records.jsonl",   // content materialized here (omit => stdin)
+            "records_path": "records",       // dotted path to the array (omit => output IS the array)
+            "id_field": "id"                 // record key (default "id")
+          },
+          "rules": [
+            { "name": "record-approval-reviewer-only",
+              "match": {"type": "field", "field": "stage", "to": "approved"},
+              "roles": {"not_in": ["reviewer", "owner"]}, "effect": "deny" }
+          ],
+          "default": "allow" }
+      ]
     }
-  ]
+  }
 }
 ```
-
-> Build this file with a tool (e.g. `jq`), **not** a shell heredoc — a heredoc
-> mangles the regex backslashes in `added_regex` and produces invalid JSON.
 
 ### `allowed_signers` file
 
@@ -128,30 +152,30 @@ It mirrors `RoleActions` in `internal/action/policy.go` — the single source of
 **commit-less** landing identity — provision it only when you want merges via
 portitor; omit it and merges are simply unavailable through portitor.
 
-Gate-side, `role_rules` enforce role→content (e.g. only `reviewer`/`owner` may add
-a `"status":"closed"` line to the beads file). These are generic — portitor knows
-nothing of beads/spex; the rule above is just config.
+Gate-side, `content_rules` enforce role→content (e.g. only `reviewer`/`owner` may
+move a record's `stage` to `approved`, and only they may delete/rename files under
+a protected directory). These are generic mechanism — every domain name (paths,
+fields, values, the record-extraction command) is config; portitor ships none.
 
 ---
 
 ## Config examples (every case)
 
-### 1. Minimal (gate only, no role rules, single role)
+### 1. Minimal (gate only, no content rules, single role)
 
 ```json
 {
   "default_branch": "main",
   "allowed_signers": "/etc/portitor/allowed_signers",
   "upstream_slug": "youruser/yourrepo",
-  "roles": { "SHA256:aaaa…": "implementer" },
-  "role_rules": []
+  "roles": { "SHA256:aaaa…": "implementer" }
 }
 ```
 
 Accepts signed feature-branch pushes from the implementer key, rejects pushes to
 `main` and unsigned/untrusted commits, forwards + auto-PRs accepted branches.
 
-### 2. Full (all roles + content rule + ancestry)
+### 2. Full (all roles + content rules + ancestry)
 
 ```json
 {
@@ -165,23 +189,82 @@ Accepts signed feature-branch pushes from the implementer key, rejects pushes to
     "SHA256:bbbb…": "reviewer",
     "SHA256:cccc…": "merger"
   },
-  "role_rules": [
-    { "name": "bead-close-reviewer-only", "path_glob": ".beads/issues.jsonl",
-      "added_regex": "\"status\"\\s*:\\s*\"closed\"", "allowed_roles": ["reviewer", "owner"] }
-  ]
+  "content_rules": {
+    "version": 1,
+    "structural": {
+      "rules": [
+        { "name": "registry-ops-reviewer-only",
+          "paths": ["registry/**"], "operations": ["delete", "rename"],
+          "roles": {"not_in": ["reviewer", "owner"]}, "effect": "deny" }
+      ]
+    },
+    "semantic": {
+      "files": [
+        { "path": "registry/records.jsonl",
+          "check": { "command": ["/usr/local/bin/records-list", "--json"],
+                     "input_file": "records.jsonl", "records_path": "records" },
+          "rules": [
+            { "name": "record-approval-reviewer-only",
+              "match": {"type": "field", "field": "stage", "to": "approved"},
+              "roles": {"not_in": ["reviewer", "owner"]}, "effect": "deny" }
+          ],
+          "default": "allow" }
+      ]
+    }
+  }
 }
 ```
 
-### 3. A second, generic content rule (e.g. protect a path)
+### 3. Protect a path structurally (owner-only CI config)
+
+A `structural.rules` entry (a fragment — it goes inside `content_rules` next to
+`"version": 1` as in example 2):
 
 ```json
-{ "name": "ci-config-owner-only", "path_glob": ".github/workflows/*",
-  "added_regex": ".*", "allowed_roles": ["owner"] }
+{ "name": "ci-config-owner-only",
+  "paths": [".github/workflows/**"],
+  "operations": ["add", "modify", "delete", "rename"],
+  "roles": {"not_in": ["owner"]}, "effect": "deny" }
 ```
 
-Any added line under `.github/workflows/` must be owner-signed.
+Any file operation under `.github/workflows/` must be owner-signed — including
+deletes and renames into or out of the directory (a rename is double-visible, so
+it can't evade add/delete protection).
 
-### 4. Multi-repo registry layout
+### 4. Restrict a role to specific transitions (semantic, default-deny)
+
+The *restrict* form: the file default denies, allows carve out what each role may
+do per named field. Here the implementer may only move `stage` from `draft` to
+`review`; reviewer/owner may change `stage` freely; nobody else touches it.
+Fields no rule names (e.g. `title`) are outside the protection surface — edits to
+them are not gated:
+
+```json
+{ "path": "registry/records.jsonl",
+  "check": { "command": ["/usr/local/bin/records-list", "--json"],
+             "input_file": "records.jsonl", "records_path": "records" },
+  "rules": [
+    { "name": "no-born-or-moved-approved",
+      "match": {"type": "field", "field": "stage", "to": "approved"},
+      "roles": {"not_in": ["reviewer", "owner"]}, "effect": "deny" },
+    { "name": "impl-may-submit",
+      "match": {"type": "field", "field": "stage", "from": "draft", "to": "review"},
+      "roles": {"in": ["implementer"]}, "effect": "allow" },
+    { "name": "reviewer-owns-stage",
+      "match": {"type": "field", "field": "stage", "changed": true},
+      "roles": {"in": ["reviewer", "owner"]}, "effect": "allow" },
+    { "name": "records-may-be-added",
+      "match": {"type": "record", "change": "added"},
+      "effect": "allow" }
+  ],
+  "default": "deny" }
+```
+
+(The first rule is the *gate* form riding in front of the restrict rules: a record
+arriving at `approved` — by transition **or** born there on addition — is denied
+for everyone but reviewer/owner, before the broader allows can decide.)
+
+### 5. Multi-repo registry layout
 
 One portitor mediates many repos. Put one config per repo under the registry dir
 (default `/etc/portitor/repos.d/`); `add-repo` and `portitor pr --repo <name>`

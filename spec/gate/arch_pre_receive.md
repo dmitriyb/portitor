@@ -115,17 +115,27 @@ Identity is a **credential, not a label**: each commit's signer key fingerprint 
 **role** via `Config.Roles` (fingerprint → role). A container holding only one role's key cannot
 sign as another role, so the role is unforgeable.
 
-A `RoleRule` then gates *content* by role, generically (no beads/spex knowledge built in):
+Content protection is two rule families evaluated per introduced commit, after the signature
+check (an untrusted commit is rejected before any content rule — its role can't be trusted):
 
-```
-RoleRule{ Name, PathGlob, AddedRegex, AllowedRoles }
-```
+- **structural rules** — file-level operations (add/modify/delete/rename) × path glob × role,
+  computed from git name-status over the full, rename-aware commit diff;
+- **semantic rules** — record-level transitions inside a protected structured file, extracted
+  by an **operator-configured check command** (portitor never parses the format itself; any
+  script, tool wrapper, or service client fills that seam interchangeably) and evaluated
+  generically over record deltas.
 
-For each introduced commit, if its diff to `PathGlob` adds a line matching `AddedRegex`, the
-signer's role must be in `AllowedRoles` — else a violation named `Name`. Example config (a beads
-rule supplied externally, not hardcoded): *"only reviewer/owner may close a bead"* →
-`{PathGlob: ".beads/issues.jsonl", AddedRegex: "\"status\"\\s*:\\s*\"closed\"", AllowedRoles: ["reviewer","owner"]}`.
-An untrusted commit (`%G? != G`) is rejected before any role rule (its role can't be trusted).
+Both share one `match/effect/default` model with a fixed precedence (first-match, then per-path
+default, then global allow) and a **versioned rule schema** that fails closed on anything this
+binary does not fully understand. The full design — schema, glob semantics, matcher vocabulary,
+merge handling, the check-command contract and its isolation bounds — is specified in
+`arch_content_rules.md`. Example (domain policy supplied externally, never hardcoded): *"moving
+a record's `stage` field to `approved` requires an elevated role"* → a semantic rule matching
+`stage → approved` with `roles {not_in: [reviewer, owner]} → deny`. The mechanism's only
+external dependency is git; every domain name above comes from config.
+
+The former textual `RoleRule` (regex over added diff lines) is **retired**; a config still
+carrying `role_rules` fails validation loudly rather than having its rules silently dropped.
 
 ## Ancestry / fresh base
 
@@ -163,7 +173,8 @@ without re-provisioning. See `arch_add_role.md`.
 
 ## Boundaries
 
-The gate is generic: it knows nothing of beads/spex; domain rules (role rules, the role map) are
-external config. GitHub actions (PR open/comment/review/merge/close + read-side fetch) are handled
+The gate is generic: it knows nothing of any domain format or third-party tool; domain rules
+(content rules, the role map, the record-extraction command) are external config, and the
+mechanism's only external dependency is git. GitHub actions (PR open/comment/review/merge/close + read-side fetch) are handled
 by the **action** module over the same SSH channel — NOT via intent artifacts, and never as a `gh`
 passthrough (see `spec/action`).

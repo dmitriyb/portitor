@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dmitriyb/portitor/internal/gate"
+	"github.com/dmitriyb/portitor/internal/rules"
 )
 
 func TestResolve(t *testing.T) {
@@ -73,9 +74,14 @@ func TestValidate(t *testing.T) {
 	if p := Validate(noSigners); len(p) == 0 {
 		t.Fatal("unreadable allowed_signers should be invalid")
 	}
-	badRegex := good
-	badRegex.RoleRules = []gate.RoleRule{{Name: "r", AddedRegex: "(", AllowedRoles: []string{"reviewer"}}}
-	if p := Validate(badRegex); len(p) == 0 {
-		t.Fatal("bad added_regex should be invalid")
+	retired := good
+	retired.RetiredRoleRules = []byte(`[{"name":"old"}]`)
+	if p := Validate(retired); len(p) == 0 {
+		t.Fatal("the retired role_rules key should be invalid (never silently dropped)")
+	}
+	badRules := good
+	badRules.Content = &rules.ContentRules{Version: 99}
+	if p := Validate(badRules); len(p) == 0 {
+		t.Fatal("an unsupported content_rules version should be invalid")
 	}
 }

@@ -6,118 +6,174 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dmitriyb/portitor/internal/check"
+	"github.com/dmitriyb/portitor/internal/rules"
 )
 
-// TestRoleRules verifies fingerprint→role attribution + a content-gated role rule:
-// "only a reviewer/owner may close a bead" (a .beads/issues.jsonl transition to
-// status closed). Role is derived from the signing key, not a forgeable label.
-func TestRoleRules(t *testing.T) {
+// TestMain intercepts the internal-check-exec re-exec: check.Records spawns
+// os.Executable() — in tests, this test binary — so the trampoline entry must
+// be handled before the test runner takes over.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "internal-check-exec" {
+		os.Exit(check.TrampolineMain(os.Args[2:]))
+	}
+	os.Exit(m.Run())
+}
+
+// contentEnv is a two-identity setup (implementer + reviewer, both trusted
+// signers) with helpers for committing per identity.
+type contentEnv struct {
+	t          *testing.T
+	dir        string
+	bare, work string
+	implKey    string
+	revKey     string
+	cfg        Config
+}
+
+func newContentEnv(t *testing.T, content *rules.ContentRules) *contentEnv {
+	t.Helper()
 	requireBins(t, "git", "ssh-keygen")
 	dir := t.TempDir()
-	bare := filepath.Join(dir, "bare.git")
-	work := filepath.Join(dir, "work")
-	mustGit(t, dir, "init", "--bare", "--initial-branch=main", bare)
-	mustGit(t, dir, "init", "--initial-branch=main", work)
-
-	implKey := filepath.Join(dir, "impl")
-	revKey := filepath.Join(dir, "rev")
-	genKey(t, implKey, "impl@example.com")
-	genKey(t, revKey, "reviewer@example.com")
-
+	e := &contentEnv{t: t, dir: dir,
+		bare: filepath.Join(dir, "bare.git"), work: filepath.Join(dir, "work"),
+		implKey: filepath.Join(dir, "impl"), revKey: filepath.Join(dir, "rev")}
+	mustGit(t, dir, "init", "--bare", "--initial-branch=main", e.bare)
+	mustGit(t, dir, "init", "--initial-branch=main", e.work)
+	genKey(t, e.implKey, "impl@example.com")
+	genKey(t, e.revKey, "reviewer@example.com")
 	allowed := filepath.Join(dir, "allowed_signers")
 	writeSigners(t, allowed, map[string]string{
-		"impl@example.com":     implKey + ".pub",
-		"reviewer@example.com": revKey + ".pub",
+		"impl@example.com":     e.implKey + ".pub",
+		"reviewer@example.com": e.revKey + ".pub",
 	})
-
-	cfg := Config{
+	e.cfg = Config{
 		AllowedSigners: allowed,
 		Roles: map[string]string{
-			fingerprint(t, implKey+".pub"): "implementer",
-			fingerprint(t, revKey+".pub"):  "reviewer",
+			fingerprint(t, e.implKey+".pub"): "implementer",
+			fingerprint(t, e.revKey+".pub"):  "reviewer",
 		},
-		RoleRules: []RoleRule{{
-			Name:         "bead-close-requires-review",
-			PathGlob:     ".beads/issues.jsonl",
-			AddedRegex:   `"status"\s*:\s*"closed"`,
-			AllowedRoles: []string{"reviewer", "owner"},
-		}},
+		Content: content,
 	}
+	mustGit(t, e.work, "remote", "add", "origin", e.bare)
+	return e
+}
 
-	mustGit(t, work, "remote", "add", "origin", bare)
-	head := func() string { return strings.TrimSpace(mustGitOut(t, work, "rev-parse", "HEAD")) }
-	writeFile := func(rel, content string) {
-		p := filepath.Join(work, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+func (e *contentEnv) head() string {
+	return strings.TrimSpace(mustGitOut(e.t, e.work, "rev-parse", "HEAD"))
+}
+
+func (e *contentEnv) identity(email, key string) {
+	e.t.Helper()
+	for _, c := range [][]string{
+		{"config", "user.name", email},
+		{"config", "user.email", email},
+		{"config", "gpg.format", "ssh"},
+		{"config", "user.signingkey", key},
+		{"config", "commit.gpgsign", "true"},
+	} {
+		mustGit(e.t, e.work, c...)
 	}
-	setIdentity := func(email, key string) {
-		for _, c := range [][]string{
-			{"config", "user.name", email},
-			{"config", "user.email", email},
-			{"config", "gpg.format", "ssh"},
-			{"config", "user.signingkey", key},
-			{"config", "commit.gpgsign", "true"},
-		} {
-			mustGit(t, work, c...)
-		}
+}
+
+func (e *contentEnv) write(rel, content string) {
+	e.t.Helper()
+	p := filepath.Join(e.work, rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		e.t.Fatal(err)
 	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
 
-	const openBead = `{"id":"b1","status":"open","title":"task"}` + "\n"
-	const closedBead = `{"id":"b1","status":"closed","title":"task"}` + "\n"
+func (e *contentEnv) commitAll(msg string) string {
+	e.t.Helper()
+	mustGit(e.t, e.work, "add", "-A")
+	mustGit(e.t, e.work, "commit", "-m", msg)
+	return e.head()
+}
 
-	// Base: an OPEN bead on main, signed by the implementer.
-	setIdentity("impl@example.com", implKey)
-	writeFile(".beads/issues.jsonl", openBead)
-	mustGit(t, work, "add", "-A")
-	mustGit(t, work, "commit", "-m", "open bead")
-	base := head()
-	mustGit(t, work, "push", "origin", "main")
+// catCheck is the simplest possible seam filler: the repo file's content IS
+// the record envelope, and the check command is plain `cat`. Proving the
+// contract takes any filler is the point — no specific tool exists in this
+// repo.
+func catCheck() rules.CheckDef {
+	return rules.CheckDef{
+		Command:     []string{"cat", "records.json"},
+		InputFile:   "records.json",
+		RecordsPath: "records",
+	}
+}
 
-	// Case A: implementer closes the bead -> rejected.
-	mustGit(t, work, "checkout", "-b", "impl-close")
-	writeFile(".beads/issues.jsonl", closedBead)
-	mustGit(t, work, "add", "-A")
-	mustGit(t, work, "commit", "-m", "close b1")
-	implClose := head()
-	mustGit(t, work, "push", "origin", "impl-close")
+// semanticGateRules: "moving a record's stage to approved requires
+// reviewer/owner" — the canonical gate-form rule, all names from config.
+func semanticGateRules() *rules.ContentRules {
+	return &rules.ContentRules{
+		Version: 1,
+		Semantic: &rules.SemanticRules{Files: []rules.SemanticFile{{
+			Path:  "registry/records.json",
+			Check: catCheck(),
+			Rules: []rules.SemanticRule{{
+				Name:   "approval-requires-review",
+				Match:  rules.Matcher{Type: "field", Field: "stage", To: "approved", HasTo: true},
+				Roles:  &rules.RolePredicate{NotIn: []string{"reviewer", "owner"}},
+				Effect: "deny",
+			}},
+		}}},
+	}
+}
 
-	// Case B: reviewer closes the bead -> accepted.
-	mustGit(t, work, "checkout", "main")
-	mustGit(t, work, "checkout", "-b", "rev-close")
-	setIdentity("reviewer@example.com", revKey)
-	writeFile(".beads/issues.jsonl", closedBead)
-	mustGit(t, work, "add", "-A")
-	mustGit(t, work, "commit", "-m", "close b1")
-	revClose := head()
-	mustGit(t, work, "push", "origin", "rev-close")
+// TestSemanticRules verifies fingerprint→role attribution + a semantic
+// transition rule computed over check-command record deltas. Role is derived
+// from the signing key, not a forgeable label.
+func TestSemanticRules(t *testing.T) {
+	e := newContentEnv(t, semanticGateRules())
 
-	// Case C: implementer makes a non-close change -> no role violation.
-	mustGit(t, work, "checkout", "main")
-	mustGit(t, work, "checkout", "-b", "impl-code")
-	setIdentity("impl@example.com", implKey)
-	writeFile("code.go", "package x\n")
-	mustGit(t, work, "add", "-A")
-	mustGit(t, work, "commit", "-m", "add code")
-	implCode := head()
-	mustGit(t, work, "push", "origin", "impl-code")
+	const draft = `{"records":[{"id":"r-1","stage":"draft","title":"task","noise":"a"}]}`
+	const approved = `{"records":[{"id":"r-1","stage":"approved","title":"task","noise":"b"}]}`
+
+	// Base: a DRAFT record on main, committed by the implementer.
+	e.identity("impl@example.com", e.implKey)
+	e.write("registry/records.json", draft)
+	base := e.commitAll("draft record")
+	mustGit(t, e.work, "push", "origin", "main")
+
+	// Case A: implementer approves -> rejected.
+	mustGit(t, e.work, "checkout", "-b", "impl-approve")
+	e.write("registry/records.json", approved)
+	implApprove := e.commitAll("approve r-1")
+	mustGit(t, e.work, "push", "origin", "impl-approve")
+
+	// Case B: reviewer approves -> accepted.
+	mustGit(t, e.work, "checkout", "main")
+	mustGit(t, e.work, "checkout", "-b", "rev-approve")
+	e.identity("reviewer@example.com", e.revKey)
+	e.write("registry/records.json", approved)
+	revApprove := e.commitAll("approve r-1")
+	mustGit(t, e.work, "push", "origin", "rev-approve")
+
+	// Case C: implementer makes an unrelated change -> no violation.
+	mustGit(t, e.work, "checkout", "main")
+	mustGit(t, e.work, "checkout", "-b", "impl-code")
+	e.identity("impl@example.com", e.implKey)
+	e.write("code.go", "package x\n")
+	implCode := e.commitAll("add code")
+	mustGit(t, e.work, "push", "origin", "impl-code")
 
 	tests := []struct {
 		name string
 		u    RefUpdate
 		want []string
 	}{
-		{"implementer close rejected", RefUpdate{base, implClose, "refs/heads/impl-close"}, []string{"bead-close-requires-review"}},
-		{"reviewer close accepted", RefUpdate{base, revClose, "refs/heads/rev-close"}, nil},
-		{"implementer non-close accepted", RefUpdate{base, implCode, "refs/heads/impl-code"}, nil},
+		{"implementer approval rejected", RefUpdate{base, implApprove, "refs/heads/impl-approve"}, []string{"approval-requires-review"}},
+		{"reviewer approval accepted", RefUpdate{base, revApprove, "refs/heads/rev-approve"}, nil},
+		{"implementer unrelated change accepted", RefUpdate{base, implCode, "refs/heads/impl-code"}, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			vs, err := Check(bare, []RefUpdate{tc.u}, cfg)
+			vs, err := Check(e.bare, []RefUpdate{tc.u}, e.cfg)
 			if err != nil {
 				t.Fatalf("Check: %v", err)
 			}

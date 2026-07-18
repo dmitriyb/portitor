@@ -18,8 +18,13 @@ for r in implementer reviewer merger; do
   printf 'dca-%s namespaces="git" %s\n' "$r" "$(awk '{print $1,$2}' "$r.pub")"
 done > portitor-config/allowed_signers
 
-# portitor.json (role map by fingerprint + content rule: only reviewer closes beads).
-# Build with jq, NOT a heredoc — a shell heredoc mangles the regex backslashes.
+# portitor.json — DEPLOY POLICY (this file, not portitor, knows the domain).
+# portitor's content_rules are generic mechanism: the semantic check command
+# below is *this deployment's* record extractor (br, the beads CLI, pinned by
+# the toolset overlay); portitor itself ships no knowledge of it.
+# Rules: only reviewer closes beads; only reviewer/owner may delete/rename the
+# beads files. --all is required (br's default listing hides closed records —
+# without it a close would read as a record removal); --limit 0 pins unlimited.
 i=$(ssh-keygen -lf implementer.pub|awk '{print $2}')
 v=$(ssh-keygen -lf reviewer.pub|awk '{print $2}')
 m=$(ssh-keygen -lf merger.pub|awk '{print $2}')
@@ -27,8 +32,18 @@ jq -n --arg i "$i" --arg v "$v" --arg m "$m" '{
   default_branch:"main", allowed_signers:"/etc/portitor/allowed_signers", upstream_remote:"upstream",
   upstream_slug:"dmitriyb/dca-sandbox",
   roles: {($i):"implementer", ($v):"reviewer", ($m):"merger"},
-  role_rules: [{name:"bead-close-reviewer-only", path_glob:".beads/issues.jsonl",
-    added_regex:"\"status\"\\s*:\\s*\"closed\"", allowed_roles:["reviewer","owner"]}]
+  content_rules: {
+    version: 1,
+    structural: {rules: [{name:"beads-file-reviewer-only", paths:[".beads/**"],
+      operations:["delete","rename"], roles:{not_in:["reviewer","owner"]}, effect:"deny"}]},
+    semantic: {files: [{path:".beads/issues.jsonl",
+      check: {command:["br","--no-db","list","--json","--all","--limit","0"],
+              input_file:".beads/issues.jsonl", records_path:"issues", id_field:"id"},
+      rules: [{name:"bead-close-reviewer-only",
+        match:{type:"field", field:"status", to:"closed"},
+        roles:{not_in:["reviewer","owner"]}, effect:"deny"}],
+      default:"allow"}]}
+  }
 }' > portitor-config/portitor.json
 ```
 

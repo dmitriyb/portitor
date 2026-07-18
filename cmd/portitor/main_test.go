@@ -44,10 +44,16 @@ func TestValidateConfig(t *testing.T) {
 		t.Fatal("config with unreadable allowed_signers should fail")
 	}
 
-	// Bad role-rule regex → non-zero.
-	badRegex := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"role_rules":[{"name":"r","added_regex":"(","allowed_roles":["reviewer"]}]}`)
-	if rc := validateConfig([]string{"--config", badRegex}); rc == 0 {
-		t.Fatal("config with a bad added_regex should fail")
+	// The retired role_rules key → non-zero (never silently dropped).
+	retired := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"role_rules":[{"name":"r"}]}`)
+	if rc := validateConfig([]string{"--config", retired}); rc == 0 {
+		t.Fatal("config with the retired role_rules key should fail")
+	}
+
+	// Malformed content_rules (unsupported version) → non-zero.
+	badRules := write(`{"default_branch":"main","allowed_signers":"` + signers + `","roles":{"SHA256:a":"reviewer"},"content_rules":{"version":99}}`)
+	if rc := validateConfig([]string{"--config", badRules}); rc == 0 {
+		t.Fatal("config with an unsupported content_rules version should fail")
 	}
 
 	// Missing path → exit 2.

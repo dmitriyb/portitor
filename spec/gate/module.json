@@ -1,6 +1,6 @@
 {
   "name": "gate",
-  "description": "portitor's push-verification core: the checks a git pre-receive runs against an incoming push, inspecting the resulting objects/refs (not commands). Generic git-gateway logic with no beads/spex knowledge. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
+  "description": "portitor's push-verification core: the checks a git pre-receive runs against an incoming push, inspecting the resulting objects/refs (not commands). Generic git-gateway logic with no domain or third-party-tool knowledge — its only external dependency is git. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
   "requirements": [
     {
       "type": "functional",
@@ -24,8 +24,18 @@
     },
     {
       "type": "functional",
-      "title": "Enforce role-gated content rules",
-      "description": "A RoleRule {Name, PathGlob, AddedRegex, AllowedRoles} requires that any introduced commit whose diff to PathGlob adds a line matching AddedRegex be signed by a role in AllowedRoles, else a violation named Name. Generic mechanism; domain rules (e.g. 'only reviewer/owner may close a bead' on .beads/issues.jsonl) are supplied as external config, not built in."
+      "title": "Enforce structural content rules (file operations by path and role)",
+      "description": "Structural rules gate file-level operations — add, modify, delete, rename — by path glob and signer role, computed from git name-status over the full rename-aware commit diff (never a pathspec-filtered diff). Rule = paths x operations x role-predicate -> allow/deny; fixed precedence: first-match, then per-path default, then global allow. A rename is double-visible (delete-at-old-path and add-at-new-path events) so it cannot evade add/delete protection. Unknown git status letters are errors (fail-closed). See arch_content_rules.md."
+    },
+    {
+      "type": "functional",
+      "title": "Enforce semantic content rules (record transitions via an operator-configured check command)",
+      "description": "Semantic rules gate record-level transitions inside a protected structured file. Portitor never parses the file's format: an operator-configured check command (explicit argv from config; any script, tool wrapper, or service client fills the seam interchangeably) extracts records in a generic {id, fields} form (records JSON-path and id field configurable), run hermetically (content as data via file or stdin — never argv, never a shell; 30s deadline; RLIMIT_AS via a re-exec trampoline; bounded input and output; private throwaway workdir; minimal env). Portitor decomposes the old/new record sets into fine-grained change units (record-added, record-removed, and per-field changes over the named-field set only — never whole-record, so an extractor's derived fields cannot poison verdicts) and decides each unit independently (matchers: field from/to/changed, record added/removed, labels contains/added; roles in/not_in; an allow authorizes exactly its unit, never the surrounding record). Attribution is per commit. A non-zero check-command exit is a violation rejecting the push; a failure to run the contract is an operational error — fail-closed regardless of what fills the seam. The mechanism's only external dependency is git. See arch_content_rules.md."
+    },
+    {
+      "type": "functional",
+      "title": "Versioned, fail-closed content-rule schema",
+      "description": "content_rules carries an explicit schema version; this binary gates only with a version it fully understands — any other value (missing, higher, lower) is a config error that makes the gate refuse to run, never gate with a partially understood ruleset. Unknown matcher types, operations, effects, malformed globs, or malformed check-command declarations are config errors at compile time. The retired role_rules key is a validation error with a migration message, never silently dropped."
     },
     {
       "type": "functional",
@@ -76,8 +86,20 @@
   "components": [
     {
       "name": "Gate",
-      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and role-gated content rules.",
+      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and orchestrates the structural + semantic content-rule evaluation per commit.",
       "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "ContentRules",
+      "description": "internal/rules: the pure rule engine — schema types (versioned), strict compile/validate (unknown values are errors), glob matching (* per segment, ** spans segments), structural evaluation over change events, record-delta computation, and semantic matcher evaluation. No subprocess or git calls; fully unit- and fuzz-testable.",
+      "content": "arch_content_rules.md",
+      "implements": []
+    },
+    {
+      "name": "CheckCommand",
+      "description": "internal/check: the hermetic invocation of the operator-configured record extractor — passes a side's content as data (materialized at the config-declared relative input_file in a private throwaway workdir, or piped to stdin), runs the config-fixed argv under a 30s deadline with RLIMIT_AS applied through the `portitor internal-check-exec` re-exec trampoline, a minimal environment, and an output cap; reads records from the configured records_path/id_field; and distinguishes a non-zero content rejection (a push violation) from a failure to run the contract (an operational error). Knows no tool identity — what fills the seam is deploy config.",
+      "content": "arch_content_rules.md",
       "implements": []
     },
     {
