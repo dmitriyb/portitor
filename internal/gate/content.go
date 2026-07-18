@@ -73,55 +73,68 @@ type nsEntry struct {
 
 // structuralEvents computes a commit's change events over the full,
 // rename-aware diff. Non-merge commits diff against their (first) parent (the
-// empty tree for roots). Merge commits diff against each parent; a path counts
-// only if it differs from every parent (a clean merge introduces nothing), and
-// the first-parent entry is the one evaluated.
+// empty tree for roots). Merge commits use git's combined-diff file set (the
+// paths that differ from EVERY parent — a clean merge introduces nothing) to
+// decide what the merge introduces, and evaluate the first-parent entry (the
+// branch's own line of development) for those paths.
 func structuralEvents(repoDir, commit string, parents []string) ([]rules.ChangeEvent, error) {
-	switch len(parents) {
-	case 0:
-		entries, err := diffTreeEntries(repoDir, "", commit)
+	if len(parents) <= 1 {
+		from := ""
+		if len(parents) == 1 {
+			from = parents[0]
+		}
+		entries, err := diffTreeEntries(repoDir, from, commit)
 		if err != nil {
 			return nil, err
 		}
 		return eventsFromEntries(entries)
-	case 1:
-		entries, err := diffTreeEntries(repoDir, parents[0], commit)
-		if err != nil {
-			return nil, err
-		}
-		return eventsFromEntries(entries)
-	default:
-		first, err := diffTreeEntries(repoDir, parents[0], commit)
-		if err != nil {
-			return nil, err
-		}
-		keep := make(map[string]bool, len(first))
-		for _, e := range first {
-			keep[e.path] = true
-		}
-		for _, p := range parents[1:] {
-			entries, err := diffTreeEntries(repoDir, p, commit)
-			if err != nil {
-				return nil, err
-			}
-			inParent := make(map[string]bool, len(entries))
-			for _, e := range entries {
-				inParent[e.path] = true
-			}
-			for path := range keep {
-				if !inParent[path] {
-					delete(keep, path) // equal to this parent: not introduced by the merge
-				}
-			}
-		}
-		var merged []nsEntry
-		for _, e := range first {
-			if keep[e.path] {
-				merged = append(merged, e)
-			}
-		}
-		return eventsFromEntries(merged)
 	}
+
+	// Merge: the introduced set is git's combined diff — paths differing from
+	// all parents. Computing it directly (not by intersecting per-parent
+	// name-status by path) is essential: rename detection in the first-parent
+	// diff relabels a delete-of-X as a rename-X→Y, and a path-keyed
+	// intersection would then drop the deletion of a protected path. The
+	// first-parent entries still supply the OPERATION (with rename
+	// double-visibility); we keep only the events whose path is in the
+	// introduced set — so the delete-side of a laundering rename is retained
+	// and the add-side (content that came from an already-authorized parent) is
+	// excluded.
+	introduced, err := combinedDiffPaths(repoDir, commit)
+	if err != nil {
+		return nil, err
+	}
+	first, err := diffTreeEntries(repoDir, parents[0], commit)
+	if err != nil {
+		return nil, err
+	}
+	events, err := eventsFromEntries(first)
+	if err != nil {
+		return nil, err
+	}
+	kept := events[:0]
+	for _, ev := range events {
+		if introduced[ev.Path] {
+			kept = append(kept, ev)
+		}
+	}
+	return kept, nil
+}
+
+// combinedDiffPaths returns the paths in a merge commit's combined diff — those
+// differing from every parent. `-c` produces output only for merges.
+func combinedDiffPaths(repoDir, commit string) (map[string]bool, error) {
+	out, err := git.OutputHermetic(repoDir, "diff-tree", "-c", "-r", "-z", "--name-only", "--no-commit-id", commit, "--")
+	if err != nil {
+		return nil, err
+	}
+	paths := map[string]bool{}
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			paths[p] = true
+		}
+	}
+	return paths, nil
 }
 
 // diffTreeEntries runs the full-diff name-status (rename- and copy-aware,

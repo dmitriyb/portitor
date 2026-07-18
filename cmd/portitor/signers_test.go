@@ -40,6 +40,20 @@ func TestSignerLineGrammar(t *testing.T) {
 	if !e.certAuthority || e.live() {
 		t.Fatalf("cert-authority must be flagged: %+v", e)
 	}
+	// cert-authority in the standard comma-joined options form must still flag.
+	e, _ = parseSignerLine(`ca cert-authority,namespaces="git" ssh-ed25519 KEYDATA`)
+	if !e.certAuthority {
+		t.Fatalf("comma-joined cert-authority must be flagged: %+v", e)
+	}
+	// A quoted namespaces value containing a comma stays one option.
+	e, _ = parseSignerLine(`role namespaces="git,file" ssh-ed25519 KEYDATA`)
+	if !e.gitNamespace {
+		t.Fatalf("quoted multi-namespace should include git: %+v", e)
+	}
+	e, _ = parseSignerLine(`role namespaces="file,other" ssh-ed25519 KEYDATA`)
+	if e.gitNamespace {
+		t.Fatalf("non-git quoted namespaces must not be git: %+v", e)
+	}
 	// A keytype-shaped principal must not shift the positional parse.
 	e, _ = parseSignerLine(`sk-agent namespaces="git" ssh-ed25519 REALKEY`)
 	if e.keyType != "ssh-ed25519" || e.keyData != "REALKEY" {
@@ -97,6 +111,23 @@ func TestGuardRefusesCertAuthority(t *testing.T) {
 	}
 	after, _ := os.ReadFile(cfg)
 	if string(before) != string(after) {
+		t.Fatal("config was modified despite the refusal")
+	}
+}
+
+// TestGuardRefusesCommaJoinedCertAuthority: the cert-authority option in the
+// standard comma-joined form (cert-authority,namespaces="git") must still make
+// the guard refuse — it previously failed open on the compound token.
+func TestGuardRefusesCommaJoinedCertAuthority(t *testing.T) {
+	dir := t.TempDir()
+	_, fp := genKey(t, dir, "somekey")
+	caLine := `ca cert-authority,namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGhpZGRlbmNha2V5aGlkZGVuY2FrZXloaWRkZW5jYQ` + "\n"
+	_, cfg, _ := seedRepo(t, `{"`+fp+`":"implementer"}`, caLine)
+	before, _ := os.ReadFile(cfg)
+	if rc := addRole([]string{"--repo", "myrepo", "--role", "merger", "--fingerprint", fp}); rc != 1 {
+		t.Fatalf("rc = %d, want 1 (comma-joined cert-authority must refuse)", rc)
+	}
+	if after, _ := os.ReadFile(cfg); string(before) != string(after) {
 		t.Fatal("config was modified despite the refusal")
 	}
 }

@@ -101,20 +101,19 @@ func FuzzSignerLineKeyBlob(f *testing.F) {
 			return
 		}
 		fields := strings.Fields(line)
-		// The extracted keytype and keydata must both be actual fields of the
-		// line, adjacent, with the keytype not at index 0 (that is the principal).
-		ktIdx := -1
-		for i, tok := range fields {
-			if tok == e.keyType {
-				ktIdx = i
+		// The extracted (keytype, keydata) must be an adjacent field pair at
+		// index >= 1 (field[0] is the principal — a keytype-shaped principal
+		// must never be read as the keytype). A byte-identical principal and
+		// keytype is legitimate, so we search from index 1, not "first match".
+		found := false
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == e.keyType && fields[i+1] == e.keyData {
+				found = true
 				break
 			}
 		}
-		if ktIdx <= 0 {
-			t.Fatalf("keytype %q not found past the principal in %q", e.keyType, line)
-		}
-		if ktIdx+1 >= len(fields) || fields[ktIdx+1] != e.keyData {
-			t.Fatalf("keydata %q is not the field after the keytype in %q", e.keyData, line)
+		if !found {
+			t.Fatalf("extracted pair (%q,%q) is not an adjacent field pair past the principal in %q", e.keyType, e.keyData, line)
 		}
 	})
 }

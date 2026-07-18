@@ -71,11 +71,16 @@ func run(dir string, timeout time.Duration, hermetic bool, args ...string) (stri
 	cmd := exec.CommandContext(ctx, "git", a...)
 	if hermetic {
 		// os/exec keeps the last value for a duplicated key, so these override
-		// any ambient GIT_CONFIG_* in the parent environment. GIT_CONFIG_COUNT=0
-		// also neutralizes GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n env-injected
-		// config, so no ambient channel can contribute a verification input.
+		// any ambient GIT_CONFIG_* in the parent environment. All of git's
+		// environment config channels are neutralized: GIT_CONFIG_GLOBAL/SYSTEM
+		// (the file channels), GIT_CONFIG_COUNT=0 (the KEY_n/VALUE_n channel),
+		// and GIT_CONFIG_PARAMETERS (the command-line-scope channel, which could
+		// otherwise inject an unpinned verification input such as
+		// gpg.ssh.program). So no ambient channel can contribute a verification
+		// input — the two verdict-critical keys are additionally pinned via -c.
 		cmd.Env = append(os.Environ(),
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_COUNT=0")
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+			"GIT_CONFIG_COUNT=0", "GIT_CONFIG_PARAMETERS=")
 	}
 	// A child that inherits the pipes must not extend the deadline indefinitely.
 	cmd.WaitDelay = 5 * time.Second

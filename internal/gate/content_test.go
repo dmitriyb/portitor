@@ -167,6 +167,41 @@ func TestSemanticCheckFailure(t *testing.T) {
 	})
 }
 
+// TestStructuralMergeRenameEvasion: a crafted merge that deletes a protected
+// file while the first-parent diff relabels it as a rename must still be gated
+// (the combined-diff introduced set retains the delete-side event). Regression
+// for the merge+rename structural evasion.
+func TestStructuralMergeRenameEvasion(t *testing.T) {
+	e := newContentEnv(t, structuralRules()) // deny delete/rename under registry/ for non-reviewers
+
+	e.identity("impl@example.com", e.implKey)
+	e.write("registry/records.json", "secret")
+	e.write("keep.txt", "k")
+	base := e.commitAll("base")
+	mustGit(t, e.work, "push", "origin", "main")
+
+	// Side branch: add an identical-content file elsewhere (primes rename
+	// detection), delete nothing.
+	mustGit(t, e.work, "checkout", "-qb", "side")
+	e.write("elsewhere.json", "secret")
+	e.commitAll("add elsewhere")
+
+	// Merge side into a feature branch off base, and delete the protected file
+	// in the merge commit itself.
+	mustGit(t, e.work, "checkout", "-q", "main")
+	mustGit(t, e.work, "checkout", "-qb", "feature")
+	mustGit(t, e.work, "merge", "-q", "--no-ff", "--no-commit", "side")
+	mustGit(t, e.work, "rm", "-q", "registry/records.json")
+	mergeTip := e.commitAll("evil merge deletes protected file")
+	mustGit(t, e.work, "push", "origin", "feature")
+
+	vs, err := Check(e.bare, []RefUpdate{{OldSHA: base, NewSHA: mergeTip, Ref: "refs/heads/feature"}}, e.cfg)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	assertRules(t, vs, []string{"registry-ops-review-only"})
+}
+
 // TestSemanticCleanMerge: a merge whose protected-file blob equals a parent's
 // introduces nothing — the merge signer is not charged for transitions that
 // arrived through an already-gated parent line.

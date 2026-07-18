@@ -108,6 +108,24 @@ func TestPoisonedGlobalConfig(t *testing.T) {
 		assertRules(t, vs, []string{"unsigned-or-untrusted-commit"})
 	})
 
+	t.Run("GIT_CONFIG_PARAMETERS cannot inject a verifier", func(t *testing.T) {
+		// The command-line-scope env config channel must be masked: a hostile
+		// gpg.ssh.program (an unpinned verification input) must not flip an
+		// untrusted commit to accepted. Point it at a program that would "pass"
+		// any signature; the verdict must remain a rejection.
+		yes := filepath.Join(e.dir, "yes-verifier")
+		if err := os.WriteFile(yes, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GIT_CONFIG_PARAMETERS", "'gpg.ssh.program="+yes+"'")
+		cfg := Config{AllowedSigners: e.allowedSigners}
+		vs, err := Check(e.bare, []RefUpdate{{OldSHA: base, NewSHA: featWrong, Ref: "refs/heads/feat-wrongkey"}}, cfg)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		assertRules(t, vs, []string{"unsigned-or-untrusted-commit"})
+	})
+
 	t.Run("empty allowed_signers distrusts everyone", func(t *testing.T) {
 		// Even a good-key commit must be rejected when no trust root is
 		// configured — never silently accepted via the ambient config.

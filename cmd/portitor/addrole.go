@@ -390,25 +390,55 @@ func parseSignerLine(line string) (signerEntry, bool) {
 		return signerEntry{}, false
 	}
 	e := signerEntry{keyType: kt, keyData: kd, gitNamespace: true}
-	for _, opt := range f[1:idx] {
-		lower := strings.ToLower(opt)
-		switch {
-		case lower == "cert-authority":
-			e.certAuthority = true
-		case strings.HasPrefix(lower, "namespaces="):
-			val := strings.Trim(opt[len("namespaces="):], `"`)
-			e.gitNamespace = false
-			for _, ns := range strings.Split(val, ",") {
-				if strings.EqualFold(strings.TrimSpace(ns), "git") {
-					e.gitNamespace = true
-					break
+	// The options region (fields between the principal and the keytype) is
+	// itself a single comma-separated list per the allowed_signers grammar
+	// (e.g. `cert-authority,namespaces="git"`), and option values may be quoted
+	// and contain commas. Split each field on commas OUTSIDE quotes so a
+	// compound option token cannot hide cert-authority from the guard.
+	for _, field := range f[1:idx] {
+		for _, opt := range splitOptions(field) {
+			lower := strings.ToLower(opt)
+			switch {
+			case lower == "cert-authority":
+				e.certAuthority = true
+			case strings.HasPrefix(lower, "namespaces="):
+				val := strings.Trim(opt[len("namespaces="):], `"`)
+				e.gitNamespace = false
+				for _, ns := range strings.Split(val, ",") {
+					if strings.EqualFold(strings.TrimSpace(ns), "git") {
+						e.gitNamespace = true
+						break
+					}
 				}
+			case strings.HasPrefix(lower, "valid-after="), strings.HasPrefix(lower, "valid-before="):
+				e.timeBoxed = true
 			}
-		case strings.HasPrefix(lower, "valid-after="), strings.HasPrefix(lower, "valid-before="):
-			e.timeBoxed = true
 		}
 	}
 	return e, true
+}
+
+// splitOptions splits an allowed_signers options field on commas that are not
+// inside a double-quoted value (a quoted namespaces list like "git,file" stays
+// one option).
+func splitOptions(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inQuote := false
+	for _, r := range s {
+		switch {
+		case r == '"':
+			inQuote = !inQuote
+			cur.WriteRune(r)
+		case r == ',' && !inQuote:
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	out = append(out, cur.String())
+	return out
 }
 
 // acquireLock takes an exclusive advisory flock on path (created 0600),
