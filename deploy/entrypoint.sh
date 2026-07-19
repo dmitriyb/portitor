@@ -8,18 +8,15 @@
 #   AGENT_AUTHORIZED_KEY one or more agent/role PUBLIC keys (one per line). Each is
 #                        installed with a forced command so the key can ONLY do
 #                        gated git + the role-checked `portitor pr` API.
-#   PORTITOR_CONFIG      optional legacy fallback config path. The canonical
-#                        per-repo config identity is the registry
-#                        (/etc/portitor/repos.d/<repo>.json): the gate hooks
-#                        bake it at provisioning, and `portitor pr` resolves it
-#                        by --repo. Set this only for a legacy single-config
-#                        layout.
+#
+# Config identity is the registry (/etc/portitor/repos.d/<repo>.json): the gate
+# hooks bake their config path at provisioning, and `portitor pr` resolves it by
+# --repo. The forced command therefore needs no config env of its own.
 #
 # Repos are provisioned out of band with `portitor add-repo` (or init-repo) and
 # live on the /srv/git volume.
 set -eu
 
-PORTITOR_CONFIG="${PORTITOR_CONFIG:-/srv/git/portitor.json}"
 PORTITOR_BIN=/usr/local/bin/portitor
 
 ssh-keygen -A # host keys
@@ -53,19 +50,18 @@ if [ -n "${AGENT_AUTHORIZED_KEY:-}" ]; then
 	printf '%s\n' "$AGENT_AUTHORIZED_KEY" | while IFS= read -r key; do
 		[ -n "$key" ] || continue
 		fp=$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')
-		printf 'command="PORTITOR_CONFIG=%s %s shell %s",restrict,no-touch-required %s\n' \
-			"$PORTITOR_CONFIG" "$PORTITOR_BIN" "$fp" "$key" \
+		printf 'command="%s shell %s",restrict,no-touch-required %s\n' \
+			"$PORTITOR_BIN" "$fp" "$key" \
 			>>/home/git/.ssh/authorized_keys
 	done
 	chown git:git /home/git/.ssh/authorized_keys
 	chmod 600 /home/git/.ssh/authorized_keys
 fi
 
-# Fail fast on a broken/missing repo config instead of silently rejecting every push
-# later (an empty/unparseable config makes the gate distrust ALL commits). Validate
-# the default config plus every per-repo config in the registry; skip paths that
-# don't exist yet (a fresh deploy before `add-repo` has nothing to check).
-for cfg in "$PORTITOR_CONFIG" /etc/portitor/repos.d/*.json; do
+# Fail fast on a broken repo config instead of silently rejecting every push later
+# (an invalid config makes the gate distrust ALL commits). Validate every per-repo
+# config in the registry; a fresh deploy before `add-repo` has nothing to check.
+for cfg in /etc/portitor/repos.d/*.json; do
 	[ -f "$cfg" ] || continue
 	"$PORTITOR_BIN" validate-config --config "$cfg" || {
 		echo "portitor entrypoint: refusing to start — $cfg is invalid (see above)" >&2
