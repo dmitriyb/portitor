@@ -60,6 +60,9 @@ func main() {
 	case "-h", "--help", "help":
 		usageTo(os.Stdout)
 		os.Exit(0)
+	case "-v", "--version", "version":
+		printVersion(os.Stdout)
+		os.Exit(0)
 	default:
 		fmt.Fprintf(os.Stderr, "portitor: unknown subcommand %q\n", os.Args[1])
 		usage()
@@ -89,6 +92,8 @@ provisioning (operator):
 action channel (over SSH):
   shell <fingerprint>     forced command: dispatch to git-pack or the pr API
   pr <comment|review|merge|close|fetch> --repo <name> --pr <n> [--event …]
+
+  -v, --version, version    print version, commit, and build date
 
 See README.md and spec/ for the full model.
 `)

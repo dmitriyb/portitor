@@ -56,6 +56,47 @@ is invalid.
 
 ---
 
+## Releases
+
+The `portitor` binary (the same binary the container image runs, useful
+standalone for `add-role`/`validate-config`/`reconcile` from an operator's
+machine) is published on the [GitHub Releases page][releases] for
+linux/darwin, amd64/arm64. The container itself is **not** a release
+artifact — build it locally with `docker build -t portitor .`.
+
+[releases]: https://github.com/dmitriyb/portitor/releases
+
+Each release publishes, per platform: a `.tar.gz` archive, a `.sha256`
+checksum, and a `.minisig` Ed25519 signature, plus a consolidated
+`checksums.txt` and a machine-readable `manifest.json` (schema, target,
+sha256, and size per artifact — for tooling that wants to pin a checksum
+without scraping the release page).
+
+**Verify a checksum:**
+
+```bash
+sha256sum -c portitor_<version>_<os>_<arch>.tar.gz.sha256
+```
+
+**Verify the signature** ([minisign][minisign], Ed25519):
+
+```bash
+minisign -Vm portitor_<version>_<os>_<arch>.tar.gz \
+  -P RWT5i/aTmI+e2Fi0U0na8qcxEYbMsMYd6JBYbhSDOtxDqF+5orMVUFZO
+```
+
+[minisign]: https://jedisct1.github.io/minisign/
+
+Releases also carry a [SLSA build provenance attestation][slsa], verifiable with:
+
+```bash
+gh attestation verify portitor_<version>_<os>_<arch>.tar.gz --owner dmitriyb
+```
+
+[slsa]: https://slsa.dev/
+
+---
+
 ## Configuration
 
 A **per-repo JSON file in the registry** (`/etc/portitor/repos.d/<repo>.json`) is
