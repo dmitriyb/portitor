@@ -1,0 +1,82 @@
+version: 2
+
+project_name: portitor
+
+builds:
+  - id: portitor
+    main: ./cmd/portitor
+    binary: portitor
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    # portitor is a git-server-side gate: it runs on the host that hosts the
+    # bare repos, never on an agent's machine. That host is linux or darwin;
+    # windows is not a supported deployment target.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: portitor
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  # Per-build checksums (one .sha256 per archive) plus this consolidated file,
+  # matching the manifest step's assumptions in release.yml.
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+signs:
+  - id: minisign
+    cmd: minisign
+    # The release workflow writes MINISIGN_SECRET_KEY to a runner-local temp
+    # file and exports its path as MINISIGN_KEY_PATH before this runs — the
+    # secret itself never appears in an argv (visible via /proc to other
+    # processes) or a template-expanded command line.
+    args:
+      - "-S"
+      - "-s"
+      - "{{ .Env.MINISIGN_KEY_PATH }}"
+      - "-m"
+      - "${artifact}"
+      - "-x"
+      - "${signature}"
+      - "-t"
+      - "{{ .ProjectName }} {{ .Tag }}"
+    artifacts: archive
+    signature: "${artifact}.minisig"
+    output: true
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  # manifest.json is generated and attached by a dedicated release.yml step
+  # (from dist/artifacts.json + dist/metadata.json), not by GoReleaser itself.
+  prerelease: auto

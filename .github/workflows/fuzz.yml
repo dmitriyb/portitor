@@ -1,0 +1,59 @@
+# Nightly fuzzing, per the plan in spec/reviews/2026-07-18.md §5. Targets are
+# discovered from the tree at run time (any `func Fuzz*` in a _test.go file)
+# rather than hardcoded here, so new targets run the night they land with no
+# workflow edit.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # nightly, off the hour to avoid the GitHub Actions top-of-hour rush
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Per-target fuzz duration (Go duration, e.g. 3m)"
+        required: false
+        default: "3m"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run fuzz targets
+        env:
+          FUZZTIME: ${{ inputs.fuzztime || '3m' }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r file; do
+            dir="$(dirname "$file")"
+            while IFS= read -r name; do
+              echo "::group::${dir} ${name} (${FUZZTIME})"
+              if ! go test -run='^$' -fuzz="^${name}\$" -fuzztime="${FUZZTIME}" "./${dir}"; then
+                status=1
+              fi
+              echo "::endgroup::"
+            done < <(grep -oE '^func (Fuzz[A-Za-z0-9_]+)' "$file" | awk '{print $2}')
+          done < <(grep -rl '^func Fuzz' --include='*_test.go' .)
+          exit "$status"
+
+      - name: Upload failing corpus entries
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/**"
+          retention-days: 14

@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write # required for SLSA provenance
+  attestations: write # required for artifact attestations
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history for the changelog
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Install minisign
+        # Extract outside the checkout — untouched inside $GITHUB_WORKSPACE
+        # left an untracked directory behind, which GoReleaser's git-state
+        # check then refused to release from ("git is in a dirty state").
+        run: |
+          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          sudo mv "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/
+          minisign -v
+
+      - name: Write minisign secret key
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set — see RELEASE-SETUP.md"
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/minisign.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key_path"
+          echo "MINISIGN_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove minisign secret key
+        if: always()
+        run: rm -f "$MINISIGN_KEY_PATH"
+
+      - name: Generate per-artifact checksums
+        # dist/checksums.txt is the consolidated file; this adds one .sha256
+        # per archive so a single binary can be verified without the rest.
+        run: |
+          cd dist
+          for f in portitor_*.tar.gz; do
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - name: Generate release manifest
+        run: |
+          ./scripts/generate-manifest.sh dist "${GITHUB_REF_NAME}" ok | tee dist/manifest.json
+
+      - name: Upload manifest and per-artifact checksums to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" dist/manifest.json dist/portitor_*.tar.gz.sha256 --clobber
+
+      - name: Generate SLSA provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/portitor_*.tar.gz
