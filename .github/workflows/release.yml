@@ -31,9 +31,12 @@ jobs:
         run: go test ./...
 
       - name: Install minisign
+        # Extract outside the checkout — untouched inside $GITHUB_WORKSPACE
+        # left an untracked directory behind, which GoReleaser's git-state
+        # check then refused to release from ("git is in a dirty state").
         run: |
-          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz
-          sudo mv minisign-linux/x86_64/minisign /usr/local/bin/
+          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          sudo mv "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/
           minisign -v
 
       - name: Write minisign secret key
