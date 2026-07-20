@@ -1,0 +1,72 @@
+{
+  "name": "delivery",
+  "description": "portitor's release pipeline: how the `portitor` binary gets from a tagged commit to a downloadable, verifiable artifact. Binaries only — the container image is a local build artifact (`docker build -t portitor .`), never published. Generic module: the executable `.goreleaser.yaml` and the CI workflow files are the source of truth for how artifacts are built; this module documents intent and does not define a bespoke delivery-metadata schema. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
+  "requirements": [
+    {
+      "type": "functional",
+      "title": "Cross-architecture binary release",
+      "description": "Release builds target linux and darwin, each amd64 and arm64 (four targets, no windows — portitor is a git-server-side gate, never installed on an agent's machine). `.goreleaser.yaml`'s build matrix (goos × goarch) is the sole definition of the target set."
+    },
+    {
+      "type": "functional",
+      "title": "Tiered CI by trigger",
+      "description": "pull_request runs the fast gate (go build, go vet, go test). push to main runs the same gate plus `-race`. A nightly schedule fuzzes every `func Fuzz*` discovered in the tree (spec/reviews/2026-07-18.md §5's plan), each under a bounded -fuzztime, with no hardcoded target list to fall out of sync as targets are added. push of a `v*` tag runs the release pipeline. Each workflow sets `concurrency: {cancel-in-progress: true}` scoped to its own ref, and the CI workflow ignores docs-only changes (`**.md`, `spec/**`) so prose edits don't burn a runner."
+    },
+    {
+      "type": "functional",
+      "title": "Signed release artifacts",
+      "description": "Every release archive is signed with minisign (Ed25519) via GoReleaser's `signs` block. The secret key is supplied to the release workflow as the `MINISIGN_SECRET_KEY` repository secret, written to a runner-local temp file for the duration of the job and removed afterward — the key material never appears in an argv or a template-expanded command line. The corresponding public key is published in README.md so a downloader can verify with `minisign -Vm <archive> -P <pubkey>` offline, independent of GitHub's availability."
+    },
+    {
+      "type": "functional",
+      "title": "SLSA build provenance",
+      "description": "`actions/attest-build-provenance` runs in the release workflow (permissions `id-token: write`, `attestations: write`) over every published archive, producing an attestation verifiable with `gh attestation verify` — a second, GitHub-native chain of custody independent of the minisign signature."
+    },
+    {
+      "type": "functional",
+      "title": "Machine-readable release manifest",
+      "description": "`scripts/generate-manifest.sh` derives `manifest.json` from GoReleaser's own `dist/artifacts.json` (per-archive name/goos/goarch/format) and `dist/metadata.json` (version/commit/date) — recomputing each artifact's sha256 and size directly from the archive bytes on disk rather than trusting an internal field name, so the manifest is self-verifying against what actually shipped. Shape: `{schema_version, tool, version, git_sha, git_ref, built_at, status, artifacts:[{name, target, sha256, size_bytes, archive_format}]}`. It is attached to the GitHub release alongside the binaries so a downstream consumer (e.g. a Nix overlay) can pin a per-target checksum programmatically instead of hand-copying it out of a release page. The shape is generic — no portitor-specific field — and it is a derived, disposable projection: `.goreleaser.yaml` remains the one source of truth for how artifacts are actually built."
+    },
+    {
+      "type": "functional",
+      "title": "Binaries-only release channel",
+      "description": "The GitHub Releases page is the only publication channel: each release carries the four archives, a consolidated `checksums.txt`, one `.sha256` per archive, one `.minisig` per archive, and `manifest.json`. No container image, package-manager formula, or install script is published by this pipeline — the Dockerfile is a local build artifact the operator runs `docker build` against themselves."
+    },
+    {
+      "type": "non-functional",
+      "title": "Deterministic, ldflags-stamped builds",
+      "description": "Builds run with `CGO_ENABLED=0`, `-trimpath`, and linker flags `-s -w` plus `-X main.version=… -X main.commit=… -X main.date=…` sourced from the triggering tag, commit, and build time — so `portitor version` on a downloaded binary reports exactly what it shipped as, with no reliance on runtime environment to reconstruct provenance."
+    },
+    {
+      "type": "non-functional",
+      "title": "Locally provable before automation runs",
+      "description": "The identical `.goreleaser.yaml` and `scripts/generate-manifest.sh` that the release workflow drives also run unmodified via `goreleaser release --snapshot --clean` on a developer machine (snapshot mode skips publish/tag requirements) — the full build → archive → sign → checksum → manifest chain is provable without pushing a tag, holding CI secrets, or touching GitHub Actions."
+    }
+  ],
+  "components": [
+    {
+      "name": "CIPipeline",
+      "description": "`.github/workflows/ci.yml` + `fuzz.yml`: the pull_request/push-to-main fast-then-race gate (go build, go vet, go test, and -race on push only), and the nightly fuzz job that discovers every `func Fuzz*` in the tree at run time via a two-line grep/awk loop (no hardcoded target list) and runs each with a bounded -fuzztime, uploading any failing corpus entry as a workflow artifact on failure.",
+      "content": "arch_ci.md",
+      "implements": []
+    },
+    {
+      "name": "ReleasePipeline",
+      "description": "`.goreleaser.yaml` + `.github/workflows/release.yml`: on push of a `v*` tag, cross-compiles linux/darwin × amd64/arm64 via GoReleaser, archives each binary with README.md/LICENSE, computes per-artifact + consolidated sha256 checksums, and publishes the GitHub release — then layers on the per-artifact `.sha256` files, `manifest.json`, and the SLSA provenance attestation that GoReleaser itself does not produce.",
+      "content": "arch_release.md",
+      "implements": []
+    },
+    {
+      "name": "Manifest",
+      "description": "`scripts/generate-manifest.sh`: turns GoReleaser's `dist/artifacts.json` + `dist/metadata.json` into `manifest.json`, self-verifying each artifact's sha256/size from the archive bytes on disk. Generic — the shape is repo-agnostic and portitor defines no bespoke delivery-metadata schema beyond it; `.goreleaser.yaml` is the source of truth this script reads from, never the other way around.",
+      "content": "arch_release.md",
+      "implements": []
+    },
+    {
+      "name": "Signing",
+      "description": "GoReleaser's `signs` block invokes `minisign -S` against each archive with a key the release workflow materializes from the `MINISIGN_SECRET_KEY` secret into a runner-local temp file (never argv, never a template-expanded command line) and removes afterward. The public key is published in README.md. Signing, the consolidated/per-artifact sha256 checksums, and the SLSA attestation are three independent ways to trust a downloaded binary — none is a substitute for another.",
+      "content": "arch_release.md",
+      "implements": []
+    }
+  ]
+}
