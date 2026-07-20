@@ -1,7 +1,12 @@
 {
   "name": "gate",
-  "description": "portitor's push-verification core: the checks a git pre-receive runs against an incoming push, inspecting the resulting objects/refs (not commands). Generic git-gateway logic with no beads/spex knowledge. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
+  "description": "portitor's push-verification core: the checks a git pre-receive runs against an incoming push, inspecting the resulting objects/refs (not commands). Generic git-gateway logic with no domain or third-party-tool knowledge — its only external dependency is git. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
   "requirements": [
+    {
+      "type": "functional",
+      "title": "Restrict ref updates to the branch namespace",
+      "description": "Every ref update must target refs/heads/<name> (non-empty name). Any other namespace — refs/tags/*, refs/notes/*, and especially refs/replace/* (whose objects substitute for others in later git reads) — is a 'ref-namespace' violation, for creates, updates, and deletions alike; a refused ref gets no further evaluation."
+    },
     {
       "type": "functional",
       "title": "Reject pushes to the default branch",
@@ -19,8 +24,18 @@
     },
     {
       "type": "functional",
-      "title": "Enforce role-gated content rules",
-      "description": "A RoleRule {Name, PathGlob, AddedRegex, AllowedRoles} requires that any introduced commit whose diff to PathGlob adds a line matching AddedRegex be signed by a role in AllowedRoles, else a violation named Name. Generic mechanism; domain rules (e.g. 'only reviewer/owner may close a bead' on .beads/issues.jsonl) are supplied as external config, not built in."
+      "title": "Enforce structural content rules (file operations by path and role)",
+      "description": "Structural rules gate file-level operations — add, modify, delete, rename — by path glob and signer role, computed from git name-status over the full rename-aware commit diff (never a pathspec-filtered diff). Rule = paths x operations x role-predicate -> allow/deny; fixed precedence: first-match, then per-path default, then global allow. A rename is double-visible (delete-at-old-path and add-at-new-path events) so it cannot evade add/delete protection. Unknown git status letters are errors (fail-closed). See arch_content_rules.md."
+    },
+    {
+      "type": "functional",
+      "title": "Enforce semantic content rules (record transitions via an operator-configured check command)",
+      "description": "Semantic rules gate record-level transitions inside a protected structured file. Portitor never parses the file's format: an operator-configured check command (explicit argv from config; any script, tool wrapper, or service client fills the seam interchangeably) extracts records in a generic {id, fields} form (records JSON-path and id field configurable), run hermetically (content as data via file or stdin — never argv, never a shell; 30s deadline; RLIMIT_AS via a re-exec trampoline; bounded input and output; private throwaway workdir; minimal env). Portitor decomposes the old/new record sets into fine-grained change units (record-added, record-removed, and per-field changes over the named-field set only — never whole-record, so an extractor's derived fields cannot poison verdicts) and decides each unit independently (matchers: field from/to/changed, record added/removed, labels contains/added; roles in/not_in; an allow authorizes exactly its unit, never the surrounding record). Attribution is per commit. A non-zero check-command exit is a violation rejecting the push; a failure to run the contract is an operational error — fail-closed regardless of what fills the seam. The mechanism's only external dependency is git. See arch_content_rules.md."
+    },
+    {
+      "type": "functional",
+      "title": "Versioned, fail-closed content-rule schema",
+      "description": "content_rules carries an explicit schema version; this binary gates only with a version it fully understands — any other value (missing, higher, lower) is a config error that makes the gate refuse to run, never gate with a partially understood ruleset. Unknown matcher types, operations, effects, malformed globs, or malformed check-command declarations are config errors at compile time. The retired role_rules key is a validation error with a migration message, never silently dropped."
     },
     {
       "type": "functional",
@@ -30,17 +45,22 @@
     {
       "type": "functional",
       "title": "Forward accepted feature branches to the real upstream",
-      "description": "post-receive (gate.Forward) pushes each accepted, non-default, non-deletion ref update to the configured upstream remote (Config.UpstreamRemote, default 'upstream') using credentials held only by the proxy. The default branch is never forwarded (PR/owner territory; pre-receive rejects pushes to it). Forwarding runs only after pre-receive has accepted the push."
+      "description": "post-receive (gate.Forward) pushes each accepted, non-default, non-deletion refs/heads ref to the configured upstream remote (Config.UpstreamRemote, default 'upstream') using credentials held only by the proxy. Every update yields a reported status — nothing is silently dropped: forwarded; already-upstream (a rejected push whose tip upstream already contains, proven by local ancestry — out-of-order forwarding is success); skipped-default (reported so a default-branch change between pre- and post-receive can't drop a ref); skipped-non-branch/skipped-deletion; failed (non-zero exit, pointing at reconcile). The remote name and refspec parts are validated before reaching git argv. `portitor reconcile --repo <name>` re-forwards local non-default branches upstream does not already contain (idempotent) and re-attempts auto-open — the recovery path a re-push cannot trigger."
     },
     {
       "type": "functional",
       "title": "Provision a gated bare repo",
-      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (so agents clone the default from the proxy with no upstream credential), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand."
+      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (only when upstream has it), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand. Provisioning is fail-loud (remote-add/fetch/seed errors abort; a present-but-invalid config fails here, not at every later push; an absent config is a warning). Shims are written atomically (no partial fail-open stub) and carry a version marker. Without --config the path defaults to the registry (<ReposDir>/<name>.json; a basename failing ValidName is a usage error) — the single canonical config identity every consumer (gate, add-role, pr) reads. `portitor upgrade-repo` re-bakes shims to the current version idempotently; the hook subcommand names are a frozen compatibility surface."
+    },
+    {
+      "type": "functional",
+      "title": "One canonical config identity with fail-closed format versioning and strict decode",
+      "description": "Every consumer reads the same registry file (<ReposDir>/<name>.json). The config carries format_version; this binary operates only with exactly the version it understands — missing/lower/higher refuses at load (gate rejects every push loudly; add-role/pr/validate-config refuse), never operating with a partially understood config. The version is independent of the application version (bumped only on a real format change; migrations are out of scope — the operator re-provisions). Decode is strict and token-level: top-level keys byte-exact against the known set, duplicate keys rejected in every object, non-lowercase keys rejected in schema objects (the roles/action_roles data maps keep only the duplicate check), unknown fields rejected. add-role warns when the target repo's baked hook config path differs from the registry file it edits. validate-config additionally requires fingerprint-shaped role keys (SHA256: + 43 base64) and non-empty role values. See arch_config.md."
     },
     {
       "type": "functional",
       "title": "Register a fingerprint->role in an existing repo config (add-role)",
-      "description": "`portitor add-role --repo <name> --role <role> --fingerprint SHA256:... [--pub <file>]` is a re-runnable init step that edits an already-provisioned repos.d/<name>.json (config.ReposDir(), PORTITOR_REPOS_DIR-aware; ValidName-guarded so it stays inside the registry dir). It validates the fingerprint syntax + role name, sets Roles[fingerprint]=role (add, or overwrite a different mapping; identical binding is an idempotent no-op) while preserving every other config field, and — when --pub names the matching public key AND the role is a signing role — appends its `<role> namespaces=\"git\" <keytype> <keydata>` line to the config's allowed_signers file (fingerprint-checked against the pub via ssh-keygen -lf, deduped; the file is created at mode 0644 if it does not yet exist). Signing-vs-identity classification is a closed denylist: identity-only roles are exactly {merger} and every other role name is a signing role. An identity-only role (merger) passed with --pub is refused, since its key must never gain commit-signing trust; likewise an overwrite that re-binds a fingerprint already present in allowed_signers to merger is refused. The config is written atomically (temp file + rename) and re-validated with config.Validate after the write; a missing config, a present-but-invalid --repo (ValidName failure, exit 2 usage error), an unreadable/malformed --pub file or ssh-keygen failure, a fingerprint/pub mismatch, or a validation problem fails the command loudly and leaves the config untouched. It never writes private key material."
+      "description": "`portitor add-role --repo <name> --role <role> --fingerprint SHA256:... [--pub <file>]` is a re-runnable init step that edits an already-provisioned repos.d/<name>.json (config.ReposDir(), PORTITOR_REPOS_DIR-aware; ValidName-guarded so it stays inside the registry dir). The whole read-decide-write sequence — config read, identity-only guard read of allowed_signers, both writes, post-write validation — runs under an exclusive flock on <config>.lock, and the config is read once from one buffer (typed + preserved-raw views parse the same bytes). It validates the fingerprint syntax + role name, sets Roles[fingerprint]=role (add/overwrite; identical binding is an idempotent no-op) preserving every other field, and — when --pub names the matching public key AND the role is a signing role — appends the signer line to the config's allowed_signers (fingerprint-checked via ssh-keygen -lf; deduped against LIVE entries only: non-comment, git-namespace, no validity window; file created 0644 if absent). Signing-vs-identity classification is per-repo config: identity_only_roles lists the roles whose keys must never gain commit-signing trust (portitor ships no role names). An identity-only role with --pub is refused; an overwrite rebinding a fingerprint already trusted in allowed_signers to an identity-only role is refused; within that guard an ssh-keygen failure is a loud error (never skip-the-line) and a cert-authority entry anywhere makes it refuse conservatively (certified keys cannot be enumerated). Writes are atomic (temp+fsync+rename), re-validated after; every successful run warns if the repo's baked hook config path diverges from the registry file. It never writes private key material."
     },
     {
       "type": "functional",
@@ -54,6 +74,16 @@
     },
     {
       "type": "non-functional",
+      "title": "Deterministic verification environment",
+      "description": "The gate's verdict is a function of the push, the repo, and the config only. Every portitor git subprocess disables replace-object substitution (core.useReplaceRefs=false); the gate's fact-gathering calls mask global/system git config (GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM=/dev/null); the allowedSignersFile pin is passed unconditionally (an empty configured path makes every signature %G? == U, so a missing trust root deterministically rejects, never falls back to ambient config). Every subprocess (git, gh, ssh-keygen) runs under a deadline; a hung or failed check rejects, never accepts."
+    },
+    {
+      "type": "non-functional",
+      "title": "Validate hook stdin before use",
+      "description": "pre/post-receive stdin lines must parse as '<old> <new> <ref>' with each SHA exactly 40 hex chars or all-zero and the ref 'refs/'-prefixed with no control bytes; any malformed line rejects the whole push. Configured remote names are validated (non-empty, no leading '-', no whitespace/control) before reaching git argv."
+    },
+    {
+      "type": "non-functional",
       "title": "Gate is a pure, isolation-testable function",
       "description": "Check(repoDir, updates, cfg) -> ([]Violation, error) shells out only to git for facts, so it is testable with ephemeral throwaway keys and a temp bare repo — no real credentials or hardware."
     }
@@ -61,8 +91,26 @@
   "components": [
     {
       "name": "Gate",
-      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and role-gated content rules.",
+      "description": "Check() evaluates ref updates against the policy and returns all violations. Owns default-branch derivation, new-commit enumeration, per-commit signature verification + fingerprint->role attribution via git, and orchestrates the structural + semantic content-rule evaluation per commit.",
       "content": "arch_pre_receive.md",
+      "implements": []
+    },
+    {
+      "name": "Config",
+      "description": "internal/config: the per-repo trust-root file — canonical registry identity (ReposDir()/<name>.json), token-level strict decode (exact top-level keys, duplicate/case discipline, DisallowUnknownFields), the fail-closed format_version guard, and Validate (gate-integrity presence, fingerprint-shaped role keys, action_roles verbs, content_rules compilation).",
+      "content": "arch_config.md",
+      "implements": []
+    },
+    {
+      "name": "ContentRules",
+      "description": "internal/rules: the pure rule engine — schema types (versioned), strict compile/validate (unknown values are errors), glob matching (* per segment, ** spans segments), structural evaluation over change events, record-delta computation, and semantic matcher evaluation. No subprocess or git calls; fully unit- and fuzz-testable.",
+      "content": "arch_content_rules.md",
+      "implements": []
+    },
+    {
+      "name": "CheckCommand",
+      "description": "internal/check: the hermetic invocation of the operator-configured record extractor — passes a side's content as data (materialized at the config-declared relative input_file in a private throwaway workdir, or piped to stdin), runs the config-fixed argv under a 30s deadline with RLIMIT_AS applied through the `portitor internal-check-exec` re-exec trampoline, a minimal environment, and an output cap; reads records from the configured records_path/id_field; and distinguishes a non-zero content rejection (a push violation) from a failure to run the contract (an operational error). Knows no tool identity — what fills the seam is deploy config.",
+      "content": "arch_content_rules.md",
       "implements": []
     },
     {
@@ -73,7 +121,7 @@
     },
     {
       "name": "PreReceiveCommand",
-      "description": "The `portitor pre-receive` subcommand: parses stdin ref updates, loads settings from the PORTITOR_CONFIG JSON file (gate.Config + upstream_remote) with env overrides (PORTITOR_DEFAULT_BRANCH, PORTITOR_ALLOWED_SIGNERS, PORTITOR_UPSTREAM_REMOTE; repo dir from GIT_DIR), runs Gate.Check, and maps the result to an exit code + stderr report.",
+      "description": "The `portitor pre-receive` subcommand: parses and validates stdin ref updates, loads settings from the PORTITOR_CONFIG JSON file, runs Gate.Check, and maps the result to an exit code + stderr report. The gate-integrity fields (default_branch, allowed_signers, roles, rules) come solely from the config file — they have NO env override, so a stray env var can never weaken the gate. Only the operational forwarding fields honor env (PORTITOR_UPSTREAM_REMOTE, PORTITOR_UPSTREAM_SLUG); the repo dir comes from GIT_DIR.",
       "content": "arch_pre_receive.md",
       "implements": []
     },
@@ -91,7 +139,7 @@
     },
     {
       "name": "AddRoleCommand",
-      "description": "The `portitor add-role` subcommand: loads repos.d/<name>.json (config.ReposDir(), PORTITOR_REPOS_DIR-aware), upserts the fingerprint->role binding in Roles, optionally appends a signing role's --pub key to allowed_signers (fingerprint-checked with ssh-keygen -lf, deduped), writes the config atomically (temp file + rename, mode preserved), and runs config.Validate afterwards. Malformed fingerprint/role, a missing config, a pub/fingerprint mismatch, or --pub for an identity-only role are loud errors; an identical re-run is an idempotent no-op.",
+      "description": "The `portitor add-role` subcommand: under an exclusive flock spanning both files, loads repos.d/<name>.json once (config.ReposDir(), PORTITOR_REPOS_DIR-aware), upserts the fingerprint->role binding in Roles, optionally appends a signing role's --pub key to allowed_signers (fingerprint-checked with ssh-keygen -lf, deduped against live entries per the consumer grammar), writes atomically (temp+fsync+rename, mode preserved), runs config.Validate afterwards, and cross-checks the baked hook config path. Identity-only classification comes from the config's identity_only_roles. Malformed fingerprint/role, a missing config, a pub/fingerprint mismatch, --pub for an identity-only role, an ssh-keygen failure inside the guard, or a cert-authority entry during the guard are loud errors; an identical re-run is an idempotent no-op.",
       "content": "arch_add_role.md",
       "implements": []
     },

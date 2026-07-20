@@ -14,29 +14,34 @@
     },
     {
       "type": "functional",
-      "title": "Role-gated pr action API",
-      "description": "`portitor pr <comment|review|merge|close|fetch> --pr N` performs one action with the upstream credential after checking the caller's role: comment/fetch for any known role; review (verdict) for reviewer/owner; merge/close for the dedicated merger/owner only. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+      "title": "Role-gated pr action API (config-driven, default-deny)",
+      "description": "`portitor pr <comment|review|merge|close|fetch> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
     },
     {
       "type": "functional",
-      "title": "Merge requires the merger credential and a re-derived approval",
-      "description": "merge is available only to the merger role (a dedicated SSH key -> fingerprint -> merger in the role map; the role never commits, the key is identity-only) or owner. Before merging, portitor re-derives the PR's approval state (reviewDecision == APPROVED) rather than trusting the request; an unapproved PR is refused. The merger credential is optional — if no merger key is provisioned, merge is unavailable via portitor."
+      "title": "Merge preconditions are re-derived from authoritative state",
+      "description": "Before merging, portitor re-derives every precondition in one gh query plus the local repo, refusing with the full unmet list: reviewDecision == APPROVED; mergeStateStatus == CLEAN (mandatory — covers behind-base, conflicts, and blocked); every configured required_check present and successful in statusCheckRollup (an empty required_checks list is advisory); and separation of duties — the requesting key must not have signed any commit the PR introduces (verified against the local gated repo via rev-list default..head + %GF, fail-closed if the head ref is absent locally; the same check guards review --event approve). Enforcement is hybrid: the final gh pr merge is the atomic gate (GitHub re-checks, closing the TOCTOU window). The landing credential is optional — with no role granted merge in action_roles, merge is unavailable via portitor."
+    },
+    {
+      "type": "functional",
+      "title": "Durable audit trail of gate and action decisions",
+      "description": "Every L1 gate decision (accept/reject/error, malformed hook stdin included), every forward outcome, every L2 action decision (allow/deny/error with the reason), and every auto-open outcome appends one fsync'd JSON line to the config's audit_log path (file 0600, missing parents 0700). Kinds: gate, forward, action, auto-pr. Fields: time, kind, repo, caller fingerprint + role where known (the shell dispatcher exports the fingerprint to the hook environment for push attribution), action/PR/refs, verdict, reason. A config that cannot be loaded is the one inherently unauditable failure. Unset audit_log disables the trail; a write failure never changes a verdict — it is loudly reported to stderr (deliberate, visible trade-off so an audit-disk problem cannot block landing work)."
     },
     {
       "type": "functional",
       "title": "SSH forced-command dispatch (portitor shell)",
-      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; everything else is rejected. One key thus grants gated git + the narrow action API and nothing more."
+      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND against a closed table: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs, with the caller fingerprint exported to the subprocess environment for audit attribution; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; everything else — including git-upload-archive — is rejected. One key thus grants gated git + the narrow action API and nothing more."
     },
     {
       "type": "non-functional",
       "title": "Routing is a pure, testable function",
-      "description": "The security-critical dispatch (classify), role policy (roleCan), repo-path confinement (allowedRepoPath), command tokenizing (shellSplit), and slug derivation (deriveSlug) are pure functions, unit-tested without a network. The gh layer (internal/action) is tested with a stubbed runner."
+      "description": "The security-critical dispatch (classify), role policy (action.RoleCan over the config's action_roles, default-deny), merge-precondition evaluation (a pure function over the fetched state), repo-path confinement (allowedRepoPath), command tokenizing (shellSplit), and slug derivation (deriveSlug) are pure functions, unit-tested without a network. The gh layer (internal/action) is tested with a stubbed runner."
     }
   ],
   "components": [
     {
       "name": "ActionClient",
-      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Review, Merge, ClosePR, Fetch, MergeApproved) pinned to one repo slug via -R; a swappable Runner makes it testable with stubbed gh.",
+      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Review, Merge, ClosePR, Fetch, FetchMergeState) pinned to one repo slug via -R, plus the pure precondition evaluator UnmetMergePreconditions; a swappable Runner makes it testable with stubbed gh.",
       "content": "arch_action.md",
       "implements": []
     },
@@ -48,7 +53,7 @@
     },
     {
       "name": "PrCommand",
-      "description": "`portitor pr` handler: parses the action + --pr/--event, checks roleCan(role, act), reads the body from stdin, and dispatches to ActionClient; merge re-derives approval.",
+      "description": "`portitor pr` handler: parses the action + --pr/--event, checks action.RoleCan against the config's action_roles (default-deny), reads the body from stdin, and dispatches to ActionClient; merge re-derives the full precondition set (approval, CLEAN merge state, required checks, separation of duties) and review-approve re-derives separation of duties; every decision is appended to the audit trail.",
       "content": "arch_action.md",
       "implements": []
     },

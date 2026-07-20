@@ -4,12 +4,11 @@
 # Build:  docker build -t portitor .
 # Run:    docker run -d --name portitor -p 2222:22 \
 #             -e AGENT_AUTHORIZED_KEY="$(cat agent_push_key.pub)" \
-#             -v portitor-repos:/srv/git portitor
-# Provision a repo:
-#         docker exec portitor portitor init-repo \
-#             --bare /srv/git/myrepo.git --default main \
-#             --upstream https://github.com/you/myrepo.git \
-#             --config /srv/git/myrepo.portitor.json
+#             -v portitor-config:/etc/portitor:ro -v portitor-repos:/srv/git portitor
+# Provision a repo (place /etc/portitor/repos.d/myrepo.json first; config lives
+# in the registry, the single identity the gate + pr API both read):
+#         docker exec -u git portitor portitor add-repo \
+#             --repo myrepo --upstream https://github.com/you/myrepo.git
 
 # --- build ---
 FROM golang:1.26-alpine AS build

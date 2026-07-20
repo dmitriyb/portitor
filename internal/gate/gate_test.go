@@ -63,9 +63,11 @@ func (e *testEnv) commitFile(name, content string, commitArgs ...string) string 
 	return e.head()
 }
 
-func (e *testEnv) checkout(args ...string) { mustGit(e.t, e.work, append([]string{"checkout"}, args...)...) }
-func (e *testEnv) push(refspec string)     { mustGit(e.t, e.work, "push", "origin", refspec) }
-func (e *testEnv) signWith(key string)     { mustGit(e.t, e.work, "config", "user.signingkey", key) }
+func (e *testEnv) checkout(args ...string) {
+	mustGit(e.t, e.work, append([]string{"checkout"}, args...)...)
+}
+func (e *testEnv) push(refspec string) { mustGit(e.t, e.work, "push", "origin", refspec) }
+func (e *testEnv) signWith(key string) { mustGit(e.t, e.work, "config", "user.signingkey", key) }
 
 func TestCheck(t *testing.T) {
 	requireBins(t, "git", "ssh-keygen")

@@ -6,7 +6,7 @@
 # never appear on the command line or in the image.
 #
 #   deploy/run.sh \
-#     --config-dir ~/.dca-keys/portitor-config \   # holds portitor.json + allowed_signers
+#     --config-dir ~/.dca-keys/portitor-config \   # holds repos.d/<repo>.json + allowed_signers
 #     --keys     ~/.dca-keys/implementer.pub,~/.dca-keys/reviewer.pub,~/.dca-keys/merger.pub \
 #     --name portitor --image portitor --volume portitor-repos
 #
@@ -14,9 +14,10 @@
 # network, so run it on the bridge (default) then attach dca-net:
 #   docker network connect dca-net portitor
 #
-# After it is up, provision the mirror once:
-#   docker exec portitor portitor init-repo --bare /srv/git/<repo>.git \
-#     --upstream https://github.com/<owner>/<repo>.git --config /etc/portitor/portitor.json
+# After it is up, provision the mirror once (config read from the registry,
+# /etc/portitor/repos.d/<repo>.json — the single canonical config identity):
+#   docker exec -u git portitor portitor add-repo --repo <repo> \
+#     --upstream https://github.com/<owner>/<repo>.git
 set -euo pipefail
 
 NAME=portitor IMAGE=portitor VOLUME=portitor-repos NETWORK="" CONFIGDIR="" KEYS=""
@@ -33,7 +34,7 @@ while [[ $# -gt 0 ]]; do
 		*) echo "run.sh: unknown flag: $1" >&2; exit 2 ;;
 	esac
 done
-[[ -n "$CONFIGDIR" && -f "$CONFIGDIR/portitor.json" ]] || { echo "run.sh: --config-dir <dir with portitor.json> required" >&2; exit 2; }
+[[ -n "$CONFIGDIR" && -d "$CONFIGDIR/repos.d" ]] || { echo "run.sh: --config-dir <dir with repos.d/> required" >&2; exit 2; }
 
 # GitHub PAT: env override, else the OS keychain (libsecret / macOS security).
 TOKEN="${GH_TOKEN:-}"
@@ -60,7 +61,6 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 args=(-d --name "$NAME" --restart unless-stopped
 	-v "$VOLUME":/srv/git
 	-v "$CONFIGDIR":/etc/portitor:ro
-	-e PORTITOR_CONFIG=/etc/portitor/portitor.json
 	-e GH_TOKEN="$TOKEN"
 	-e AGENT_AUTHORIZED_KEY="$AUTH")
 [[ -n "$NETWORK" ]] && args+=(--network "$NETWORK")

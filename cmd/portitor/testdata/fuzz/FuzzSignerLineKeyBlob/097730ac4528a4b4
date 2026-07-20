@@ -1,0 +1,2 @@
+go test fuzz v1
+string("ssh-\xf1\xd2 ssh-\xf1\xd2 0")
