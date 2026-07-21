@@ -30,11 +30,7 @@ REPO="portitor"
 # key (ssh-keygen -Y verify checks -I against the allowed_signers entry).
 SIGNER_ID="dvbozhko@gmail.com"
 
-# TODO(release-setup): replace with the real release-signing public key
-# (RELEASE-SETUP.md step 3) before this script is published. Left as an
-# obvious placeholder so an unfinished script fails loudly instead of
-# silently accepting nothing.
-SIGNING_PUBKEY="REPLACE-BEFORE-FIRST-RELEASE-see-RELEASE-SETUP.md-step-3"
+SIGNING_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing"
 
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
@@ -52,10 +48,6 @@ need ssh-keygen
 need tar
 need mktemp
 need uname
-
-if [ "$SIGNING_PUBKEY" = "REPLACE-BEFORE-FIRST-RELEASE-see-RELEASE-SETUP.md-step-3" ]; then
-  fail "this copy of install.sh has not been finalized (no release-signing public key embedded) — see RELEASE-SETUP.md step 3"
-fi
 
 # --- resolve the release tag ---
 if [ -n "${VERSION:-}" ]; then

@@ -30,7 +30,7 @@ Every release archive is signed with SSHSIG (`ssh-keygen -Y sign`), verifiable w
 ```bash
 curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh     -o install.sh \
 && curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh.sig -o install.sh.sig \
-&& ssh-keygen -Y verify -f <(printf 'dvbozhko@gmail.com REPLACE-BEFORE-FIRST-RELEASE-see-RELEASE-SETUP.md-step-3\n') \
+&& ssh-keygen -Y verify -f <(printf 'dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing\n') \
      -I dvbozhko@gmail.com -n file -s install.sh.sig < install.sh \
 && sh install.sh
 ```
@@ -43,7 +43,7 @@ The block above needs bash or zsh (`<(…)` process substitution).
 Under a plain `sh`, write the allowed-signers line to a file first:
 
 ```sh
-printf 'dvbozhko@gmail.com REPLACE-BEFORE-FIRST-RELEASE-see-RELEASE-SETUP.md-step-3\n' > allowed_signers
+printf 'dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing\n' > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I dvbozhko@gmail.com -n file -s install.sh.sig < install.sh
 ```
 
@@ -75,7 +75,7 @@ Each release also carries a consolidated `checksums.txt`, one `.sha256` per arch
 ### Public key
 
 ```
-dvbozhko@gmail.com REPLACE-BEFORE-FIRST-RELEASE-see-RELEASE-SETUP.md-step-3
+dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing
 ```
 
 This is the same key across all three verification paths above (SSHSIG install script, SSHSIG archive, and the `allowed_signers` line either way).
