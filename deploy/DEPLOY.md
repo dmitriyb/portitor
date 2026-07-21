@@ -1,11 +1,12 @@
 # Deploying portitor + running a live dca e2e
 
-The git/gate/role/forward path is unit- and locally-tested; this is the **real**
-run: portitor mirrors a GitHub repo, the agent works through it, and a real PR is
-opened. Run these on your machine (your keychain, tokens, GitHub).
+For a general deployment walkthrough (install the CLI from a release, provision the registry, bring up the container), see `../docs/deploy.md`.
+This document is the dca-specific worked example: it fills in every step with real values and runs it against a live GitHub sandbox repo.
 
-Prereqs: the PAT in your keychain (`service portitor account dca-sandbox`,
-Contents+PR RW on the sandbox), and the dca scripts on PATH (from dot).
+The git/gate/role/forward path is unit- and locally-tested; this is the **real** run: portitor mirrors a GitHub repo, the agent works through it, and a real PR is opened.
+Run these on your machine (your keychain, tokens, GitHub).
+
+Prereqs: the PAT in your keychain (`service portitor account dca-sandbox`, Contents+PR RW on the sandbox), and the dca scripts on PATH (from dot).
 
 ## 1. Role keys + portitor config (one-time, ~/.dca-keys)
 
@@ -93,19 +94,13 @@ docker exec -u git portitor portitor add-repo --repo dca-sandbox \
 dca --repo dca-sandbox --skill implement --bead <open-bead-id>
 ```
 
-dca builds the lean agent images + the egress proxy on first run, loads the
-implementer key from `~/.dca-keys`, and launches the headless agent on `dca-net`.
-Flow: clone from portitor → `start-implement` → `claude -p` works + commits +
-pushes → gate accepts → forward to `dca-sandbox` → **auto-PR**. Check the PR on
-`github.com/dmitriyb/dca-sandbox`.
+dca builds the lean agent images + the egress proxy on first run, loads the implementer key from `~/.dca-keys`, and launches the headless agent on `dca-net`.
+Flow: clone from portitor → `start-implement` → `claude -p` works + commits + pushes → gate accepts → forward to `dca-sandbox` → **auto-PR**.
+Check the PR on `github.com/dmitriyb/dca-sandbox`.
 
 ## Notes / first-run gotchas to expect
-- The agent's `PORTITOR_HOST` defaults to `portitor` (the container name on
-  `dca-net`); `known_hosts` is `accept-new` for the sandbox.
-- The role key in `~/.dca-keys/implementer` must be the same key whose pubkey is
-  in `repos.d/dca-sandbox.json` + `authorized_keys` — they're generated together above.
-- This spends Anthropic budget (a real `claude` run) and opens a real PR. Reset
-  between runs: close the PR, delete the agent branch, `git checkout` the beads
-  jsonl in the sandbox.
-- If `claude` doesn't honor `HTTPS_PROXY`, the egress lock blocks it — we'd then
-  switch to an `ANTHROPIC_BASE_URL` reverse-proxy (the work-mode pattern).
+
+- The agent's `PORTITOR_HOST` defaults to `portitor` (the container name on `dca-net`); `known_hosts` is `accept-new` for the sandbox.
+- The role key in `~/.dca-keys/implementer` must be the same key whose pubkey is in `repos.d/dca-sandbox.json` + `authorized_keys` — they're generated together above.
+- This spends Anthropic budget (a real `claude` run) and opens a real PR — reset between runs: close the PR, delete the agent branch, `git checkout` the beads jsonl in the sandbox.
+- If `claude` doesn't honor `HTTPS_PROXY`, the egress lock blocks it — we'd then switch to an `ANTHROPIC_BASE_URL` reverse-proxy (the work-mode pattern).
