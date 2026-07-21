@@ -45,24 +45,29 @@ checksum:
   algorithm: sha256
 
 signs:
-  - id: minisign
-    cmd: minisign
-    # The release workflow writes MINISIGN_SECRET_KEY to a runner-local temp
-    # file and exports its path as MINISIGN_KEY_PATH before this runs — the
+  - id: ssh
+    cmd: ssh-keygen
+    # The release workflow writes SSH_SIGNING_KEY to a runner-local temp file
+    # (chmod 600 — ssh-keygen refuses to load a key with looser permissions)
+    # and exports its path as SSH_SIGNING_KEY_PATH before this runs — the
     # secret itself never appears in an argv (visible via /proc to other
     # processes) or a template-expanded command line.
+    #
+    # `-n file` is the SSHSIG namespace: it domain-separates release-artifact
+    # signatures from git commit signatures (`-n git`), so a signature
+    # produced under one namespace is never valid under the other.
     args:
-      - "-S"
-      - "-s"
-      - "{{ .Env.MINISIGN_KEY_PATH }}"
-      - "-m"
+      - "-Y"
+      - "sign"
+      - "-f"
+      - "{{ .Env.SSH_SIGNING_KEY_PATH }}"
+      - "-n"
+      - "file"
       - "${artifact}"
-      - "-x"
-      - "${signature}"
-      - "-t"
-      - "{{ .ProjectName }} {{ .Tag }}"
     artifacts: archive
-    signature: "${artifact}.minisig"
+    # ssh-keygen -Y sign always writes <artifact>.sig next to the input; there
+    # is no flag to redirect it, so this must match that fixed naming exactly.
+    signature: "${artifact}.sig"
     output: true
 
 snapshot:

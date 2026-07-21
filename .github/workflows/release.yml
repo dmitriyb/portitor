@@ -30,28 +30,24 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Install minisign
-        # Extract outside the checkout — untouched inside $GITHUB_WORKSPACE
-        # left an untracked directory behind, which GoReleaser's git-state
-        # check then refused to release from ("git is in a dirty state").
-        run: |
-          curl -sL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
-          sudo mv "$RUNNER_TEMP/minisign-linux/x86_64/minisign" /usr/local/bin/
-          minisign -v
-
-      - name: Write minisign secret key
+      - name: Write SSH signing key
+        # ssh-keygen ships with the runner image (OpenSSH is preinstalled on
+        # every GitHub-hosted runner) — no separate tool install needed.
         env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          SSH_SIGNING_KEY: ${{ secrets.SSH_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$MINISIGN_SECRET_KEY" ]; then
-            echo "::error::MINISIGN_SECRET_KEY is not set — see RELEASE-SETUP.md"
+          if [ -z "$SSH_SIGNING_KEY" ]; then
+            echo "::error::SSH_SIGNING_KEY is not set — see RELEASE-SETUP.md"
             exit 1
           fi
-          key_path="$RUNNER_TEMP/minisign.key"
+          key_path="$RUNNER_TEMP/ssh-signing.key"
           umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key_path"
-          echo "MINISIGN_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          printf '%s\n' "$SSH_SIGNING_KEY" > "$key_path"
+          # ssh-keygen refuses to load a private key with group/other
+          # permissions set, even under a strict umask on some runner images.
+          chmod 600 "$key_path"
+          echo "SSH_SIGNING_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
@@ -62,9 +58,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Remove minisign secret key
+      - name: Sign install.sh
+        # install.sh is not a GoReleaser-managed artifact (it is not built per
+        # target), so it is signed here directly while the key is still
+        # available, using the identical `ssh-keygen -Y sign -n file` invocation
+        # GoReleaser's signs block uses. Its content is version-agnostic, so it
+        # (and its signature) are byte-identical across releases.
+        run: |
+          cp install.sh dist/install.sh
+          ssh-keygen -Y sign -f "$SSH_SIGNING_KEY_PATH" -n file dist/install.sh
+
+      - name: Remove SSH signing key
         if: always()
-        run: rm -f "$MINISIGN_KEY_PATH"
+        run: rm -f "$SSH_SIGNING_KEY_PATH"
 
       - name: Generate per-artifact checksums
         # dist/checksums.txt is the consolidated file; this adds one .sha256
@@ -79,11 +85,11 @@ jobs:
         run: |
           ./scripts/generate-manifest.sh dist "${GITHUB_REF_NAME}" ok | tee dist/manifest.json
 
-      - name: Upload manifest and per-artifact checksums to the release
+      - name: Upload manifest, per-artifact checksums, and install.sh to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" dist/manifest.json dist/portitor_*.tar.gz.sha256 --clobber
+          gh release upload "${GITHUB_REF_NAME}" dist/manifest.json dist/portitor_*.tar.gz.sha256 dist/install.sh dist/install.sh.sig --clobber
 
       - name: Generate SLSA provenance attestation
         uses: actions/attest-build-provenance@v2
