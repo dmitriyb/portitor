@@ -67,6 +67,7 @@ func newRootCommand() *cobra.Command {
 		newReconcileCmd(),
 		newAddRoleCmd(),
 		newValidateConfigCmd(),
+		newUpgradeCmd(),
 		newShellCmd(),
 		newPrCmd(func() string { return os.Getenv("PORTITOR_FINGERPRINT") }),
 		newVersionCmd(),
@@ -203,6 +204,39 @@ func newValidateConfigCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", os.Getenv("PORTITOR_CONFIG"), "repo config JSON (default: $PORTITOR_CONFIG)")
+	return cmd
+}
+
+func newUpgradeCmd() *cobra.Command {
+	var o upgradeOptions
+	cmd := &cobra.Command{
+		Use:   "upgrade",
+		Short: "Update the installed portitor binary to a newer signed release",
+		Long: `Update the standalone portitor binary in place to a newer signed release.
+
+It reuses the same signed install.sh the README documents — embedded in this
+binary, run against the path of the currently-running binary — so the update is
+resolved, downloaded, and SSHSIG-verified by exactly the audited installer, then
+swapped in safely (move-aside + rename, never a write over the running file).
+
+This updates the standalone operator binary only (the one also used for
+add-role/validate-config/reconcile). The container image (gate + egress) is a
+separate artifact rebuilt from the Dockerfile — upgrade does not touch it; see
+docs/deploy.md.
+
+A signature proves authenticity, not freshness: a move to an older version is
+refused unless --force.`,
+		GroupID: cli.GroupProvisioning,
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitErr(upgradeRun(o, cmd.OutOrStdout(), cmd.ErrOrStderr()))
+		},
+	}
+	cmd.Flags().BoolVar(&o.check, "check", false, "report current vs latest and change nothing")
+	cmd.Flags().BoolVar(&o.check, "dry-run", false, "alias for --check")
+	cmd.Flags().StringVar(&o.pinned, "version", "", "pin the target release (e.g. v0.1.2) instead of the latest")
+	cmd.Flags().BoolVar(&o.rollback, "rollback", false, "restore the pre-upgrade binary from the .bak left by the last upgrade")
+	cmd.Flags().BoolVar(&o.force, "force", false, "allow a downgrade to an older version")
 	return cmd
 }
 

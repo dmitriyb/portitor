@@ -8,6 +8,7 @@
 | `portitor add-role --repo <name> --role <r> --fingerprint SHA256:… [--pub <file>]` | operator | bind a fingerprint→role (+ trust its key) |
 | `portitor upgrade-repo --repo <name>` | operator | re-bake hook shims to the current version |
 | `portitor reconcile --repo <name>` | operator | re-forward accepted branches after a forward failure |
+| `portitor upgrade [--check] [--version vX.Y.Z] [--rollback] [--force]` | operator | update the standalone binary to a newer signed release |
 | `portitor validate-config [--config <path>]` | operator / boot | fail fast on a missing/invalid config |
 | `portitor shell <fingerprint>` | sshd forced command | dispatch to git-pack or the `pr` API |
 | `portitor pr <action> --repo <name> --pr <n>` | the agent (via SSH) | one role-validated GitHub action |
@@ -30,3 +31,19 @@ The final `gh pr merge` is the atomic gate; enable GitHub branch protection as d
 A landing role (e.g. `merger`) is a dedicated, **commit-less** identity; provision it only when you want merges via portitor — omit it (or grant nobody `merge`) and merges are unavailable through portitor.
 
 The full mediation model — the `portitor shell` dispatch table, auto-open-PR on forward, merge-precondition re-derivation, and the audit trail — is specified in `spec/action/arch_action.md`.
+
+## Upgrading the binary
+
+`portitor upgrade` updates the installed **standalone binary** to a newer signed release, in place.
+It does not reimplement the update: it embeds the same signed `install.sh` the README documents and runs it against the path of the currently-running binary, so the new release is resolved, downloaded, and SSHSIG-verified by exactly that audited installer — the embedded copy is byte-identical to the standalone `install.sh` (a `go test` check enforces that identity).
+The swap is safe over a running binary: the installer moves the current binary aside and `rename(2)`s the new one into place (never a write over the running file, which would hit `ETXTBSY` on Linux), keeping the displaced binary as `<path>.bak`.
+
+- `--check` / `--dry-run` — report the installed version versus the latest and change nothing.
+- `--version vX.Y.Z` — pin a specific release instead of the latest.
+- `--rollback` — restore `<path>.bak` (the binary displaced by the last upgrade).
+- `--force` — allow a move to an **older** version; by default a downgrade is refused, because a signature proves authenticity, not freshness.
+
+If the target directory is not writable, `upgrade` prints a "re-run with elevated privileges" message and stops — it never silently re-invokes `sudo`.
+
+This command maintains the **standalone operator binary** only (the one also used for `add-role`, `validate-config`, and `reconcile`).
+The container image (gate + egress) is a separate artifact rebuilt from the `Dockerfile` — `upgrade` does not touch it; see `deploy.md` for the CLI-vs-image split.

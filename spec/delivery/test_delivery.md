@@ -18,6 +18,9 @@ CI enforces on every run and what was proven locally, once, against the real too
 4. **Release-job test gate** — `.github/workflows/release.yml` runs `go test ./...` before
    invoking GoReleaser, so a release build never ships from a red tree even if CI's own gate was
    somehow bypassed for the tagged commit.
+5. **Self-update proofs (ride `go test ./...`)** — two delivery-specific checks run under the same suite the fast gate already enforces, so they gate merge like everything else:
+   - **Embedded == released byte-identity** — `TestUpgradeEmbeddedInstallMatchesCanonical` fails if `cmd/portitor/install.sh` (the embedded copy) ever diverges from the canonical repo-root `install.sh`. This is the invariant the whole "nothing to substitute" security argument rests on; a drift is caught at merge, not at release.
+   - **Fake-origin upgrade harness** — `TestUpgradeFakeOriginHarness` runs `scripts/install_upgrade_test.sh`, which drives the real `install.sh` end to end against a throwaway release origin (served over `file://` via the `PORTITOR_API_BASE`/`PORTITOR_DL_BASE` origin hooks) and a throwaway signing key baked into a temp copy of the script. It exercises resolve → download → `ssh-keygen -Y verify` → self-replace of a running binary, and the paths that matter most: the fail-closed path (a tampered artifact must leave the target untouched and exit non-zero), `--rollback`, the downgrade guard (± `--force`), `--check`, `--version` pinning, first-install, and RequireRoot (no auto-sudo). `sh -n` proves only that the script parses; the harness proves the logic. It self-skips only when a tool it needs is absent from the environment.
 
 ## What was proven locally (one-time, this module's local proof)
 

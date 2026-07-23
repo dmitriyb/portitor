@@ -97,6 +97,14 @@ It can also be pinned and cross-checked against GitHub's own copy at `https://ap
 The container image (gate + egress) is **not** a release artifact: it is built locally by the operator from this repository's `Dockerfile` (`docker build -t portitor .`).
 See `docs/deploy.md` for the CLI-vs-image split in full.
 
+### Upgrading
+
+An installed binary updates itself with `portitor upgrade`, which embeds the same signed `install.sh` above and runs it against the running binary's own path — same resolve → download → SSHSIG-verify, then a safe in-place swap (move-aside + `rename(2)`, never a write over the running file), keeping the previous binary as `<path>.bak`.
+`--check` reports current-vs-latest without changing anything, `--version vX.Y.Z` pins a release, and `--rollback` restores the backup.
+A downgrade is refused unless `--force` — a signature proves authenticity, not freshness.
+`upgrade` maintains the standalone binary only; the container image is rebuilt from the `Dockerfile`, as above.
+See [`docs/commands.md`](docs/commands.md) for the full flag reference.
+
 ---
 
 ## Usage sketch
