@@ -54,7 +54,8 @@ if [ -n "${VERSION:-}" ]; then
   tag="$VERSION"
 else
   api_url="https://api.github.com/repos/${OWNER}/${REPO}/releases/latest"
-  tag=$(curl -fsSL "$api_url" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+  # grep (no -m1) + head: read the body to EOF so curl can't abort with (56).
+  tag=$(curl -fsSL "$api_url" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
   [ -n "$tag" ] || fail "could not resolve the latest release tag from $api_url"
 fi
 version="${tag#v}"
