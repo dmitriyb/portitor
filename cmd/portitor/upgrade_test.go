@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// TestUpgradeEmbeddedInstallMatchesCanonical is the security-critical identity
+// TestUpgradeEmbeddedMatchesReleased is the security-critical identity
 // check: the install.sh embedded into this binary (cmd/portitor/install.sh)
 // MUST be byte-identical to the canonical repo-root install.sh that the release
 // workflow uploads and the README documents. If they diverge, `upgrade` would
 // run a script that is not the audited, signed installer — the whole "nothing
 // to substitute" argument collapses. Regenerate with `go generate ./cmd/portitor`.
-func TestUpgradeEmbeddedInstallMatchesCanonical(t *testing.T) {
+func TestUpgradeEmbeddedMatchesReleased(t *testing.T) {
 	canonical, err := os.ReadFile(filepath.Join("..", "..", "install.sh"))
 	if err != nil {
 		t.Fatalf("read canonical install.sh: %v", err)

@@ -68,11 +68,11 @@ need() {
   command -v "$1" >/dev/null 2>&1 || fail "'$1' is required but not found on PATH"
 }
 
-# require_root reports an unwritable target directory and stops. Upgrade mode
+# require_writable reports an unwritable target directory and stops. Upgrade mode
 # deliberately does NOT self-invoke sudo (unlike first-install): silently
 # re-running a self-replace as root is a surprise, so we detect the condition
 # and tell the operator to re-run with elevated privileges instead.
-require_root() {
+require_writable() {
   fail "$1 is not writable by the current user — re-run with elevated privileges (e.g. run 'portitor upgrade' as the owner of $1, or via sudo)"
 }
 
@@ -118,7 +118,7 @@ self_replace() {
   _t="$1"
   _src="$2"
   _dir=$(dirname "$_t")
-  [ -w "$_dir" ] || require_root "$_dir"
+  [ -w "$_dir" ] || require_writable "$_dir"
   _bak="${_t}.bak"
   _new="${_t}.new.$$"
   rm -f "$_new"
@@ -141,7 +141,7 @@ do_rollback() {
   _bak="${_t}.bak"
   [ -e "$_bak" ] || fail "no backup at ${_bak} to roll back to"
   _dir=$(dirname "$_t")
-  [ -w "$_dir" ] || require_root "$_dir"
+  [ -w "$_dir" ] || require_writable "$_dir"
   mv -f "$_bak" "$_t" || fail "rollback failed: could not restore ${_bak} -> ${_t}"
   _rv=$(binary_version "$_t")
   echo "portitor: rolled back ${_t} to ${_rv:-the previous binary}" >&2
@@ -251,7 +251,7 @@ if [ "$MODE" = upgrade ]; then
 
   # Fail fast on an unwritable target directory, before spending a download.
   _tdir=$(dirname "$TARGET")
-  [ -w "$_tdir" ] || require_root "$_tdir"
+  [ -w "$_tdir" ] || require_writable "$_tdir"
 elif [ "$CHECK" -eq 1 ]; then
   # --check without --upgrade: report the resolved latest, install nothing.
   echo "portitor: latest ${version}" >&2

@@ -13,7 +13,7 @@ import (
 // The canonical installer lives at the repo root (install.sh) — the release
 // workflow uploads it and the README documents it. //go:embed cannot traverse
 // "..", so a byte-identical copy is kept here and embedded. `go generate
-// ./cmd/portitor` refreshes it from the canonical file; TestUpgradeEmbeddedInstallMatchesCanonical
+// ./cmd/portitor` refreshes it from the canonical file; TestUpgradeEmbeddedMatchesReleased
 // (upgrade_test.go) fails the build if the two ever diverge — that identity is
 // the whole security argument: the embedded script is, for a given release,
 // the same audited, signed installer a user runs by hand, so there is nothing
