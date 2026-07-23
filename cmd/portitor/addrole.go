@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,20 +18,15 @@ import (
 // roleNameRe guards a role label: non-empty, no whitespace or path separators.
 var roleNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// addRole binds a signer-key fingerprint to a role inside an already-provisioned
+// addRoleRun binds a signer-key fingerprint to a role inside an already-provisioned
 // repo config (repos.d/<name>.json), a re-runnable init step. It upserts
 // Roles[fingerprint]=role, optionally trusts a signing role's public key in the
 // config's allowed_signers file, writes atomically, and re-validates. It never
 // writes private key material. See spec/gate/arch_add_role.md.
-func addRole(args []string) int {
-	fs := flag.NewFlagSet("add-role", flag.ContinueOnError)
-	repo := fs.String("repo", "", "repository name (selects repos.d/<name>.json)")
-	role := fs.String("role", "", "role to bind the fingerprint to")
-	fp := fs.String("fingerprint", "", "signer key fingerprint (SHA256:...)")
-	pub := fs.String("pub", "", "OpenSSH public key file to trust for a signing role (optional)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
+func addRoleRun(repoV, roleV, fpV, pubV string) int {
+	// Bind the cobra-parsed flag values to pointers so the read-decide-write body
+	// below reads exactly as it did under the hand-rolled flag.FlagSet.
+	repo, role, fp, pub := &repoV, &roleV, &fpV, &pubV
 
 	// ---- flag validation (usage errors, exit 2) ----
 	if *repo == "" {

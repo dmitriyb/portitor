@@ -13,7 +13,7 @@ agent ──ssh──▶ portitor ──┬─ git gate (pre-receive): signed? r
 
 Identity is a credential, not a label: each commit is signed by a per-role key, and portitor maps the signer *fingerprint* — never a label in the commit — to a role.
 portitor is generic mechanism; every domain name (roles, paths, fields, the record-extraction command) is config it ships none of.
-Its only dependency is git.
+Its only runtime dependency is git.
 See `docs/architecture.md` for the full model.
 
 ---
