@@ -33,6 +33,16 @@
       "description": "The GitHub Releases page is the only publication channel: each release carries the four archives, a consolidated `checksums.txt`, one `.sha256` per archive, one `.minisig` per archive, and `manifest.json`. No container image, package-manager formula, or install script is published by this pipeline — the Dockerfile is a local build artifact the operator runs `docker build` against themselves."
     },
     {
+      "type": "functional",
+      "title": "In-place self-update via the embedded installer",
+      "description": "`portitor upgrade` updates the installed standalone binary in place by reusing the signed install.sh — embedded into the binary and run in an upgrade mode against the running binary's own path — never a Go reimplementation of the update. install.sh gains an opt-in upgrade mode (--upgrade --target <path>) that keeps its resolve/download/ssh-keygen-Y-verify logic untouched and adds: a safe self-replace (move-aside + rename(2), never install/cp over the running file, to avoid ETXTBSY); a downgrade guard (refuse a version < current unless --force, since a signature is authenticity not freshness; equal → already-up-to-date, exit 0); --rollback (restore <target>.bak, and auto-restore it on any mid-replace failure); and RequireRoot with NO auto-sudo (probe target-dir writability and tell the operator to elevate, rather than self-invoking sudo as first-install mode may). first-install mode (no flags) is behaviour-preserving. NOTE: the older seed wording (minisign signing, 'no install script is published') is stale — releases sign with SSHSIG and publish install.sh(.sig); this requirement builds on that reality."
+    },
+    {
+      "type": "non-functional",
+      "title": "Embedded installer is byte-identical to the released one",
+      "description": "The canonical install.sh lives at the repo root (uploaded by release.yml, documented in the README). //go:embed cannot traverse '..', so a byte-identical copy is kept at cmd/portitor/install.sh, refreshed by `//go:generate cp ../../install.sh install.sh`, and a Go test (TestUpgradeEmbeddedInstallMatchesCanonical) fails the build if the two diverge. This identity is the security argument for self-update: because the embedded script is provably the same audited, signed installer a user runs by hand, `upgrade` needs no separate fetch-and-verify-the-script step — there is nothing to substitute. install.sh also reads test-only PORTITOR_API_BASE/PORTITOR_DL_BASE origin overrides (defaulting to production) so a fake-origin harness can drive the real script; these are not trust-sensitive (verification still gates whatever the origin serves) and the trust anchor SIGNING_PUBKEY is never env-overridable."
+    },
+    {
       "type": "non-functional",
       "title": "Deterministic, ldflags-stamped builds",
       "description": "Builds run with `CGO_ENABLED=0`, `-trimpath`, and linker flags `-s -w` plus `-X main.version=… -X main.commit=… -X main.date=…` sourced from the triggering tag, commit, and build time — so `portitor version` on a downloaded binary reports exactly what it shipped as, with no reliance on runtime environment to reconstruct provenance."
@@ -66,6 +76,12 @@
       "name": "Signing",
       "description": "GoReleaser's `signs` block invokes `minisign -S` against each archive with a key the release workflow materializes from the `MINISIGN_SECRET_KEY` secret into a runner-local temp file (never argv, never a template-expanded command line) and removes afterward. The public key is published in README.md. Signing, the consolidated/per-artifact sha256 checksums, and the SLSA attestation are three independent ways to trust a downloaded binary — none is a substitute for another.",
       "content": "arch_release.md",
+      "implements": []
+    },
+    {
+      "name": "SelfUpdate",
+      "description": "install.sh's upgrade mode (opt-in via --upgrade --target <path>), embedded into the binary and driven by `portitor upgrade`: shared resolve/download/SSHSIG-verify with first-install, plus safe self-replace (move-aside + rename to avoid ETXTBSY), a downgrade guard, --rollback, --check, and RequireRoot-no-sudo. Includes the embedded==released byte-identity invariant (cmd/portitor/install.sh via go:generate, enforced by a go test) and the test-only origin hooks. The Go front-end is the cli module's UpgradeCommand.",
+      "content": "arch_self_update.md",
       "implements": []
     }
   ]

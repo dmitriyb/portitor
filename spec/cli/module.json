@@ -5,7 +5,7 @@
     {
       "type": "functional",
       "title": "A cobra command tree with universal help",
-      "description": "A top-level cobra root (cli.NewRootCmd) registers every subcommand — the operator subcommands (init-repo, add-repo, upgrade-repo, reconcile, add-role, validate-config, pr) and the machine entrypoints (pre-receive, post-receive, shell, and the hidden internal-check-exec) — mirroring spexmachina's cli/root.go + cmd/spex/*.go split (one newXxxCmd() per subcommand). --help/-h/help print usage to stdout and exit 0 uniformly at the root and at every subcommand, cobra-generated from the registered tree and flag definitions. Help is grouped (gate / provisioning / action channel) to reproduce the old usage() structure. The root has SilenceUsage/SilenceErrors set (main owns error reporting and the exit-code mapping, so a rejected push never prints command usage), and cobra's default `completion` command is disabled so the command set does not grow; the `help` command is kept."
+      "description": "A top-level cobra root (cli.NewRootCmd) registers every subcommand — the operator subcommands (init-repo, add-repo, upgrade-repo, reconcile, add-role, validate-config, upgrade, pr) and the machine entrypoints (pre-receive, post-receive, shell, and the hidden internal-check-exec) — mirroring spexmachina's cli/root.go + cmd/spex/*.go split (one newXxxCmd() per subcommand). --help/-h/help print usage to stdout and exit 0 uniformly at the root and at every subcommand, cobra-generated from the registered tree and flag definitions. Help is grouped (gate / provisioning / action channel) to reproduce the old usage() structure. The root has SilenceUsage/SilenceErrors set (main owns error reporting and the exit-code mapping, so a rejected push never prints command usage), and cobra's default `completion` command is disabled so the command set does not grow; the `help` command is kept."
     },
     {
       "type": "functional",
@@ -21,6 +21,11 @@
       "type": "functional",
       "title": "Preserve the process exit-code contract",
       "description": "A command that ran returns its own exit code (0/1/2) out of RunE via a typed *exitError whose Error() is empty (the command already emitted its own diagnostics); main uses only the code. Any other Execute error is a cobra usage error — unknown subcommand, unknown/malformed flag, wrong arg count — and maps to exit 2, matching the hand-rolled dispatcher's usage-error code. A rejected push exits 1, an operational error exits 1, and a command's own validation error exits 2; the gate accept/reject codes and every code callers or tests depend on are preserved."
+    },
+    {
+      "type": "functional",
+      "title": "Self-update subcommand",
+      "description": "`portitor upgrade` self-updates the installed standalone binary by driving the embedded, already-signed install.sh — it does NOT reimplement resolve/download/verify/replace. It resolves the running binary's real path (os.Executable + filepath.EvalSymlinks), writes the embedded script to a private 0600 temp file, and runs `sh <file>` synchronously in upgrade mode against that path, streaming the script's output and propagating its exit code. Flags: --check/--dry-run (report current vs latest, change nothing), --version vX.Y.Z (pin, passed via the script's VERSION env), --rollback (restore <path>.bak), --force (allow a downgrade). It passes its compiled-in main.version as --current so the downgrade guard does not depend on re-executing the about-to-be-replaced binary. It is registered in the provisioning group, distinct from the pre-existing upgrade-repo command, and its help states it maintains the standalone binary only — the container image is a separate Dockerfile artifact it does not touch. The mechanism it drives is specified by the delivery module's SelfUpdate component; the embedded script is byte-identical to the canonical repo-root install.sh (a go test enforces the identity)."
     },
     {
       "type": "non-functional",
@@ -39,6 +44,12 @@
       "name": "VersionCommand",
       "description": "`portitor version` — prints `portitor <version> (commit <commit>, built <date>)` via printVersion(cmd.OutOrStdout()); the same line backs the root's --version/-v flag. Values injected via ldflags at build time.",
       "content": "arch_version_command.md",
+      "implements": []
+    },
+    {
+      "name": "UpgradeCommand",
+      "description": "`portitor upgrade` — the thin Go front-end (newUpgradeCmd + upgradeRun in cmd/portitor) that self-updates the installed standalone binary by embedding the canonical install.sh and running it in upgrade mode against the running binary's resolved path. Flags --check/--dry-run, --version, --rollback, --force; reimplements no update logic (that lives in install.sh — see the delivery module's SelfUpdate). Distinct from upgrade-repo.",
+      "content": "arch_upgrade_command.md",
       "implements": []
     },
     {
@@ -77,6 +88,11 @@
     {
       "name": "Version Command Tests",
       "content": "test_version_command.md",
+      "describes": []
+    },
+    {
+      "name": "Upgrade Command Tests",
+      "content": "test_upgrade_command.md",
       "describes": []
     }
   ]
