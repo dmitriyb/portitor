@@ -108,8 +108,17 @@ build_release() {
   mkdir -p "$_stage"
   make_fake_binary "$_stage/portitor" "$_ver"
   _arc="portitor_${_ver}_${GOOS}_${GOARCH}.tar.gz"
+  # Rebuild from clean. ssh-keygen -Y sign PROMPTS "Overwrite (y/n)?" when
+  # <arc>.sig already exists and, given no stdin (go test), reads EOF and
+  # declines — silently leaving a STALE signature from an earlier build of the
+  # same version. The rebuilt archive's gzip mtime differs, so that stale sig
+  # then fails verification (flaky, depending on whether a rebuild crossed a
+  # wall-clock second). Removing both first makes the signature always match the
+  # archive just written; the `|| exit` stops masking a genuine signing failure.
+  rm -f "$_dldir/$_arc" "$_dldir/$_arc.sig"
   tar -czf "$_dldir/$_arc" -C "$_stage" portitor
-  ssh-keygen -Y sign -f "$SIGNER_KEY" -n file "$_dldir/$_arc" >/dev/null 2>&1
+  ssh-keygen -Y sign -f "$SIGNER_KEY" -n file "$_dldir/$_arc" >/dev/null 2>&1 \
+    || { echo "harness: signing $_arc failed" >&2; exit 1; }
   if [ "$_mode" = tamper ]; then
     printf 'tampered' >> "$_dldir/$_arc"
   fi
@@ -233,7 +242,6 @@ check "S7 target is the pinned 0.1.1" 0.1.1 "$(tgt_version "$TGT")"
 build_release 0.1.2
 INSTALL_DIR="$WORK/s8/bin"
 mkdir -p "$INSTALL_DIR"
-echo "# S8 env: uid=$(id -u) install=$(command -v install || echo none) writable=$([ -w "$INSTALL_DIR" ] && echo yes || echo no)" >&2
 OUT=$(PORTITOR_API_BASE="file://$ORIGIN" PORTITOR_DL_BASE="file://$ORIGIN" \
   INSTALL_DIR="$INSTALL_DIR" sh "$TESTSH" 2>&1) && RC=0 || RC=$?
 check "S8 first-install exits 0" 0 "$RC"
