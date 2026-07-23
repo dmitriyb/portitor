@@ -67,7 +67,16 @@ grep -q "^SIGNING_PUBKEY=\"$(printf '%s' "$PUB" | cut -d' ' -f1) " "$TESTSH" \
 PASS=0
 FAIL=0
 ok() { PASS=$((PASS + 1)); echo "ok   - $1"; }
-no() { FAIL=$((FAIL + 1)); echo "FAIL - $1"; }
+no() {
+  FAIL=$((FAIL + 1))
+  echo "FAIL - $1"
+  # Surface the failing scenario's captured script output — the harness runs the
+  # real install.sh, and without this a fail-closed exit hides the actual error
+  # (e.g. an install/curl/tar diagnostic) behind a bare exit code.
+  if [ -n "${OUT:-}" ]; then
+    printf '%s\n' "$OUT" | sed 's/^/       script| /'
+  fi
+}
 check() { # check <desc> <expected> <actual>
   if [ "$2" = "$3" ]; then ok "$1"; else no "$1 (want [$2], got [$3])"; fi
 }
@@ -224,6 +233,7 @@ check "S7 target is the pinned 0.1.1" 0.1.1 "$(tgt_version "$TGT")"
 build_release 0.1.2
 INSTALL_DIR="$WORK/s8/bin"
 mkdir -p "$INSTALL_DIR"
+echo "# S8 env: uid=$(id -u) install=$(command -v install || echo none) writable=$([ -w "$INSTALL_DIR" ] && echo yes || echo no)" >&2
 OUT=$(PORTITOR_API_BASE="file://$ORIGIN" PORTITOR_DL_BASE="file://$ORIGIN" \
   INSTALL_DIR="$INSTALL_DIR" sh "$TESTSH" 2>&1) && RC=0 || RC=$?
 check "S8 first-install exits 0" 0 "$RC"
