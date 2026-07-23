@@ -24,4 +24,4 @@ Identity is a credential, not a label.
 Each commit is signed by a per-role key; portitor maps the signer *fingerprint* to a role and enforces per-role rules.
 A container holding only one role's key cannot act as another role.
 portitor is generic mechanism: every domain name (roles, paths, fields, values, the record-extraction command) is config; portitor ships none.
-Its only dependency is git.
+Its only runtime dependency is git.

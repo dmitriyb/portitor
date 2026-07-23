@@ -1,0 +1,83 @@
+{
+  "name": "cli",
+  "description": "Cross-cutting CLI infrastructure. Provides the cobra root command, the version subcommand + --version/-v flag, and the subcommand-registration framework that dispatches every portitor command — operator subcommands and the load-bearing machine entrypoints alike — with universal --help/-h/help at the root and every subcommand. Mirrors spexmachina's cli module so the toolchain is dispatched the same way. cobra is a compile-time dependency confined to this layer; the gate/rules/check modules do not import it and their only-runtime-dependency-is-git property is unchanged. NOTE: hand-authored SEED in spexmachina's format; identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through spex / the /spec skill; they are intentionally omitted here.",
+  "requirements": [
+    {
+      "type": "functional",
+      "title": "A cobra command tree with universal help",
+      "description": "A top-level cobra root (cli.NewRootCmd) registers every subcommand — the operator subcommands (init-repo, add-repo, upgrade-repo, reconcile, add-role, validate-config, pr) and the machine entrypoints (pre-receive, post-receive, shell, and the hidden internal-check-exec) — mirroring spexmachina's cli/root.go + cmd/spex/*.go split (one newXxxCmd() per subcommand). --help/-h/help print usage to stdout and exit 0 uniformly at the root and at every subcommand, cobra-generated from the registered tree and flag definitions. Help is grouped (gate / provisioning / action channel) to reproduce the old usage() structure. The root has SilenceUsage/SilenceErrors set (main owns error reporting and the exit-code mapping, so a rejected push never prints command usage), and cobra's default `completion` command is disabled so the command set does not grow; the `help` command is kept."
+    },
+    {
+      "type": "functional",
+      "title": "Version subcommand and --version/-v flag",
+      "description": "`portitor version` and the root's --version/-v flag both print `portitor <version> (commit <commit>, built <date>)` to stdout and exit 0. The values are the package-level main.version/commit/date variables injected at build time via ldflags (default dev/none/unknown for a local build); --version/-v use cobra's built-in version flag wired to the same line via SetVersionTemplate, so all three forms are byte-identical."
+    },
+    {
+      "type": "functional",
+      "title": "Behavior-preserving dispatch for the machine entrypoints",
+      "description": "Migrating from the hand-rolled `switch os.Args[1]` to cobra must not let cobra's flag/arg validation break the non-human entrypoints. pre-receive/post-receive take no user flags and read ref updates from stdin (Args: cobra.ArbitraryArgs so cobra never rejects git's argless invocation; the RunE reads cmd.InOrStdin() and returns the verdict). shell <fingerprint> is the SSH forced command whose argv is operator-controlled; its RunE hands the args to the shell dispatcher untouched, and its pr route re-executes the same cobra pr command with the connection fingerprint injected as the actor identity. internal-check-exec is a Hidden subcommand with DisableFlagParsing (the operator-configured command it trampolines into may carry arbitrary flags cobra must not parse); its handler calls os.Exit directly so no allocation unwinds back through cobra after the rlimit is applied. Provisioning defaults and every stdin/exit contract are unchanged."
+    },
+    {
+      "type": "functional",
+      "title": "Preserve the process exit-code contract",
+      "description": "A command that ran returns its own exit code (0/1/2) out of RunE via a typed *exitError whose Error() is empty (the command already emitted its own diagnostics); main uses only the code. Any other Execute error is a cobra usage error — unknown subcommand, unknown/malformed flag, wrong arg count — and maps to exit 2, matching the hand-rolled dispatcher's usage-error code. A rejected push exits 1, an operational error exits 1, and a command's own validation error exits 2; the gate accept/reject codes and every code callers or tests depend on are preserved."
+    },
+    {
+      "type": "non-functional",
+      "title": "cobra is a compile-time dependency only",
+      "description": "github.com/spf13/cobra (version matching spexmachina) is added to go.mod, pulling in github.com/spf13/pflag and github.com/inconshreveable/mousetrap as indirects. cobra is a build-time library baked into the binary; it does not change portitor's only-runtime-dependency-is-git property — the running binary still needs only git on the host. cobra is confined to the CLI layer (cli/, cmd/portitor/); the gate, rules, and check modules do not import it."
+    }
+  ],
+  "components": [
+    {
+      "name": "RootCommand",
+      "description": "cli.NewRootCmd: the top-level `portitor` cobra command. Sets Use/Short/Long, SilenceUsage/SilenceErrors, disables the default completion command, and registers the gate/provisioning/action command groups. Not runnable on its own; cmd/portitor's newRootCommand() sets the version metadata (--version/-v) and adds every subcommand.",
+      "content": "arch_root_command.md",
+      "implements": []
+    },
+    {
+      "name": "VersionCommand",
+      "description": "`portitor version` — prints `portitor <version> (commit <commit>, built <date>)` via printVersion(cmd.OutOrStdout()); the same line backs the root's --version/-v flag. Values injected via ldflags at build time.",
+      "content": "arch_version_command.md",
+      "implements": []
+    },
+    {
+      "name": "MachineEntrypointDispatch",
+      "description": "The cobra wrapping of the load-bearing entrypoints: pre-receive/post-receive (ArbitraryArgs, stdin, verdict-as-exit-code), shell <fingerprint> (SSH forced command; pr route re-executes the cobra pr command with the connection fingerprint injected), and the hidden internal-check-exec trampoline (DisableFlagParsing, os.Exit). Plus the *exitError plumbing and the usage-error → exit 2 mapping that preserve the process exit-code contract.",
+      "content": "arch_machine_entrypoints.md",
+      "implements": []
+    }
+  ],
+  "impl_sections": [
+    {
+      "name": "Cobra Setup and Registration",
+      "content": "impl_cobra_setup.md",
+      "describes": []
+    },
+    {
+      "name": "Version Injection",
+      "content": "impl_version_injection.md",
+      "describes": []
+    }
+  ],
+  "data_flows": [
+    {
+      "name": "Command Dispatch and Exit Codes",
+      "description": "How user (and machine) input flows from argv through cobra to the correct subcommand handler, and how each handler's result becomes the process exit code.",
+      "content": "flow_command_dispatch.md",
+      "uses": []
+    }
+  ],
+  "test_sections": [
+    {
+      "name": "Root and Universal-Help Tests",
+      "content": "test_root_command.md",
+      "describes": []
+    },
+    {
+      "name": "Version Command Tests",
+      "content": "test_version_command.md",
+      "describes": []
+    }
+  ]
+}

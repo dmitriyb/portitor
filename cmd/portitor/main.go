@@ -11,7 +11,6 @@ package main
 import (
 	"bufio"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -28,105 +27,44 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	switch os.Args[1] {
-	case "pre-receive":
-		os.Exit(preReceive(os.Stdin, os.Stderr))
-	case "post-receive":
-		os.Exit(postReceive(os.Stdin, os.Stderr))
-	case "init-repo":
-		os.Exit(initRepo(os.Args[2:]))
-	case "shell":
-		os.Exit(shellCommand(os.Args[2:]))
-	case "add-repo":
-		os.Exit(addRepo(os.Args[2:]))
-	case "upgrade-repo":
-		os.Exit(upgradeRepo(os.Args[2:]))
-	case "reconcile":
-		os.Exit(reconcile(os.Args[2:]))
-	case "add-role":
-		os.Exit(addRole(os.Args[2:]))
-	case "validate-config":
-		os.Exit(validateConfig(os.Args[2:]))
-	case "pr":
-		os.Exit(prCommand(os.Getenv("PORTITOR_FINGERPRINT"), os.Args[2:]))
-	case "internal-check-exec":
-		// Not part of the CLI surface: the rlimit trampoline internal/check
-		// re-execs through. The SSH shell dispatcher cannot route here.
-		os.Exit(internalCheckExec(os.Args[2:]))
-	case "-h", "--help", "help":
-		usageTo(os.Stdout)
-		os.Exit(0)
-	case "-v", "--version", "version":
-		printVersion(os.Stdout)
-		os.Exit(0)
-	default:
-		fmt.Fprintf(os.Stderr, "portitor: unknown subcommand %q\n", os.Args[1])
-		usage()
+	root := newRootCommand()
+	if err := root.Execute(); err != nil {
+		// A command that ran carries its own exit code (and has already emitted
+		// its own diagnostics); anything else is a cobra usage error — unknown
+		// subcommand, bad flag, wrong arg count — which maps to exit 2, matching
+		// the hand-rolled dispatcher's usage-error code.
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 }
 
-func usage() { usageTo(os.Stderr) }
-
-func usageTo(w io.Writer) {
-	fmt.Fprint(w, `portitor — a git gateway that verifies the result of a push and mediates GitHub actions.
-
-usage: portitor <command> [flags]
-
-gate (git hooks):
-  pre-receive             run the gate over an incoming push (accept/reject)
-  post-receive            forward accepted feature branches upstream + auto-open PRs
-
-provisioning (operator):
-  init-repo   --bare <path> [--default <b>] [--upstream <url>] [--config <json>]
-  add-repo    --repo <name> [--default <b>] [--upstream <url>]
-  upgrade-repo --repo <name> | --bare <path>    re-bake hook shims to the current version
-  add-role    --repo <name> --role <role> --fingerprint SHA256:… [--pub <file>]
-  reconcile   --repo <name>    re-forward accepted branches after a forward failure
-  validate-config [--config <path>]    fail fast on a missing/invalid config
-
-action channel (over SSH):
-  shell <fingerprint>     forced command: dispatch to git-pack or the pr API
-  pr <comment|review|merge|close|fetch> --repo <name> --pr <n> [--event …]
-
-  -v, --version, version    print version, commit, and build date
-
-See README.md and spec/ for the full model.
-`)
-}
-
-// validateConfig checks a repo config up front (at container boot / by an operator)
-// so a missing or malformed config fails LOUDLY here instead of silently rejecting
-// every push later (an empty config makes the gate distrust all commits). Exit 0 =
-// valid, non-zero = problems printed to stderr.
-func validateConfig(args []string) int {
-	fs := flag.NewFlagSet("validate-config", flag.ContinueOnError)
-	cfgPath := fs.String("config", os.Getenv("PORTITOR_CONFIG"), "repo config JSON (default: $PORTITOR_CONFIG)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *cfgPath == "" {
+// validateConfigRun checks a repo config up front (at container boot / by an
+// operator) so a missing or malformed config fails LOUDLY here instead of
+// silently rejecting every push later (an empty config makes the gate distrust
+// all commits). Exit 0 = valid, non-zero = problems printed to stderr.
+func validateConfigRun(cfgPath string) int {
+	if cfgPath == "" {
 		fmt.Fprintln(os.Stderr, "validate-config: no config path (set $PORTITOR_CONFIG or pass --config)")
 		return 2
 	}
-	s, err := config.LoadFile(*cfgPath)
+	s, err := config.LoadFile(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "validate-config: %v\n", err)
 		return 1
 	}
 	problems := config.Validate(s)
 	if len(problems) > 0 {
-		fmt.Fprintf(os.Stderr, "validate-config: %s is INVALID:\n", *cfgPath)
+		fmt.Fprintf(os.Stderr, "validate-config: %s is INVALID:\n", cfgPath)
 		for _, p := range problems {
 			fmt.Fprintf(os.Stderr, "  - %s\n", p)
 		}
 		return 1
 	}
-	fmt.Printf("validate-config: %s OK (%d role(s)%s)\n", *cfgPath, len(s.Roles), contentSummary(s.Content))
+	fmt.Printf("validate-config: %s OK (%d role(s)%s)\n", cfgPath, len(s.Roles), contentSummary(s.Content))
 	return 0
 }
 
@@ -306,30 +244,25 @@ func postReceive(r io.Reader, w io.Writer) int {
 	return rc
 }
 
-// reconcile re-forwards a repo's accepted feature branches that never reached
+// reconcileRun re-forwards a repo's accepted feature branches that never reached
 // upstream (an upstream-forward failure cannot be re-triggered by a re-push,
 // since pre-receive accepts an already-present tip with zero new commits). It
 // is idempotent — a branch already upstream is a no-op — and re-attempts the
 // auto-open PR for each reconciled branch.
-func reconcile(args []string) int {
-	fs := flag.NewFlagSet("reconcile", flag.ContinueOnError)
-	repo := fs.String("repo", "", "repository name (selects the per-repo config)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *repo == "" {
+func reconcileRun(repo string) int {
+	if repo == "" {
 		fmt.Fprintln(os.Stderr, "reconcile: --repo <name> required")
 		return 2
 	}
-	s, err := config.Resolve(*repo)
+	s, err := config.Resolve(repo)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reconcile: %v\n", err)
 		return 1
 	}
-	bare := filepath.Join(config.ReposRoot(), *repo+".git")
+	bare := filepath.Join(config.ReposRoot(), repo+".git")
 	def := s.DefaultBranch
 	auditEvent := func(e audit.Event) {
-		e.Repo = *repo
+		e.Repo = repo
 		if aerr := audit.Append(s.AuditLog, e); aerr != nil {
 			fmt.Fprintf(os.Stderr, "reconcile: audit: %v\n", aerr)
 		}
@@ -415,85 +348,78 @@ func autoOpenPR(dir, def, ref string, gh action.GH) (int, string, error) {
 // each is the per-repo config's action_roles map, default-deny. Every decision
 // is appended to the audit trail.
 
-func prCommand(fp string, args []string) int {
+func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader, out, errw io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "portitor pr: action required (comment|review|merge|close|fetch)")
+		fmt.Fprintln(errw, "portitor pr: action required (comment|review|merge|close|fetch)")
 		return 2
 	}
 	act := args[0]
-	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
-	pr := fs.Int("pr", 0, "PR number")
-	event := fs.String("event", "", "review event: approve|request-changes|comment")
-	repo := fs.String("repo", "", "repository name (selects the per-repo config)")
-	if err := fs.Parse(args[1:]); err != nil {
-		return 2
-	}
 	if !action.KnownVerb(act) {
-		fmt.Fprintf(os.Stderr, "portitor pr: unknown action %q\n", act)
+		fmt.Fprintf(errw, "portitor pr: unknown action %q\n", act)
 		return 2
 	}
-	if *repo == "" {
-		fmt.Fprintln(os.Stderr, "portitor pr: --repo <name> required")
+	if repo == "" {
+		fmt.Fprintln(errw, "portitor pr: --repo <name> required")
 		return 2
 	}
-	if *pr <= 0 {
-		fmt.Fprintln(os.Stderr, "portitor pr: --pr <number> required")
+	if prNum <= 0 {
+		fmt.Fprintln(errw, "portitor pr: --pr <number> required")
 		return 2
 	}
 	// Per-repo config: the role map + upstream slug come from THIS repo's config,
 	// so one portitor mediates many repos. The role is re-derived from the signer
 	// fingerprint against that repo's roles (a credential, not a passed-in label).
-	s, err := config.Resolve(*repo)
+	s, err := config.Resolve(repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
+		fmt.Fprintf(errw, "portitor pr: %v\n", err)
 		return 1
 	}
 	role := s.Roles[fp]
 
 	auditDecision := func(verdict, reason string) {
-		e := audit.Event{Kind: "action", Repo: *repo, Fingerprint: fp, Role: role,
-			Action: act, PR: *pr, Verdict: verdict, Reason: reason}
+		e := audit.Event{Kind: "action", Repo: repo, Fingerprint: fp, Role: role,
+			Action: act, PR: prNum, Verdict: verdict, Reason: reason}
 		if aerr := audit.Append(s.AuditLog, e); aerr != nil {
-			fmt.Fprintf(os.Stderr, "portitor pr: audit: %v\n", aerr)
+			fmt.Fprintf(errw, "portitor pr: audit: %v\n", aerr)
 		}
 	}
 	deny := func(reason string) int {
 		auditDecision("deny", reason)
-		fmt.Fprintf(os.Stderr, "portitor pr: %s\n", reason)
+		fmt.Fprintf(errw, "portitor pr: %s\n", reason)
 		return 1
 	}
 	fail := func(err error) int {
 		auditDecision("error", err.Error())
-		fmt.Fprintf(os.Stderr, "portitor pr: %v\n", err)
+		fmt.Fprintf(errw, "portitor pr: %v\n", err)
 		return 1
 	}
 
 	if role == "" {
-		return deny(fmt.Sprintf("key has no role for repo %q", *repo))
+		return deny(fmt.Sprintf("key has no role for repo %q", repo))
 	}
 	if !action.RoleCan(s.ActionRoles, role, act) {
 		return deny(fmt.Sprintf("role %q may not %q (action_roles is default-deny)", role, act))
 	}
 	gh := ghClient(s)
 	if gh.Repo == "" {
-		return fail(fmt.Errorf("no upstream slug configured for repo %q", *repo))
+		return fail(fmt.Errorf("no upstream slug configured for repo %q", repo))
 	}
 	switch act {
 	case "fetch":
-		out, err := gh.Fetch(*pr)
+		res, err := gh.Fetch(prNum)
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Print(out)
+		fmt.Fprint(out, res)
 	case "comment":
-		if err := gh.Comment(*pr, readBody()); err != nil {
+		if err := gh.Comment(prNum, readBody(in)); err != nil {
 			return fail(err)
 		}
 	case "review":
-		if *event == "approve" {
+		if event == "approve" {
 			// Separation of duties: an approval must not come from a key that
 			// signed the PR's own commits.
-			signed, err := requesterSignedPR(s, *repo, fp, *pr, gh)
+			signed, err := requesterSignedPR(s, repo, fp, prNum, gh)
 			if err != nil {
 				return fail(fmt.Errorf("separation-of-duties check: %w", err))
 			}
@@ -501,16 +427,16 @@ func prCommand(fp string, args []string) int {
 				return deny(fmt.Sprintf("separation of duties: key %s signed commits this PR introduces; it may not approve", fp))
 			}
 		}
-		if err := gh.Review(*pr, *event, readBody()); err != nil {
+		if err := gh.Review(prNum, event, readBody(in)); err != nil {
 			return fail(err)
 		}
 	case "merge":
-		st, err := gh.FetchMergeState(*pr)
+		st, err := gh.FetchMergeState(prNum)
 		if err != nil {
 			return fail(err)
 		}
 		unmet := action.UnmetMergePreconditions(st, s.RequiredChecks)
-		signed, err := requesterSignedHead(s, *repo, fp, st.HeadRefName)
+		signed, err := requesterSignedHead(s, repo, fp, st.HeadRefName)
 		if err != nil {
 			return fail(fmt.Errorf("separation-of-duties check: %w", err))
 		}
@@ -518,15 +444,15 @@ func prCommand(fp string, args []string) int {
 			unmet = append(unmet, fmt.Sprintf("separation of duties: key %s signed commits this PR introduces", fp))
 		}
 		if len(unmet) > 0 {
-			return deny(fmt.Sprintf("PR #%d does not meet the merge preconditions: %s", *pr, strings.Join(unmet, "; ")))
+			return deny(fmt.Sprintf("PR #%d does not meet the merge preconditions: %s", prNum, strings.Join(unmet, "; ")))
 		}
 		// The final gh merge is the atomic gate: GitHub re-checks, so a state
 		// change since the query fails there (TOCTOU closed GitHub-side).
-		if err := gh.Merge(*pr); err != nil {
+		if err := gh.Merge(prNum); err != nil {
 			return fail(err)
 		}
 	case "close":
-		if err := gh.ClosePR(*pr); err != nil {
+		if err := gh.ClosePR(prNum); err != nil {
 			return fail(err)
 		}
 	}
@@ -573,10 +499,11 @@ func requesterSignedHead(s config.Settings, repo, fp, headRef string) (bool, err
 	return fps[fp], nil
 }
 
-// readBody reads the action body (comment/review text) from stdin, so multi-line
-// markdown survives transport intact (never squeezed through SSH command args).
-func readBody() string {
-	b, _ := io.ReadAll(os.Stdin)
+// readBody reads the action body (comment/review text) from r (stdin), so
+// multi-line markdown survives transport intact (never squeezed through SSH
+// command args).
+func readBody(r io.Reader) string {
+	b, _ := io.ReadAll(r)
 	return strings.TrimRight(string(b), "\n")
 }
 
@@ -621,9 +548,12 @@ func shellCommand(args []string) int {
 		}
 		return 0
 	case "pr":
-		// Pass the fingerprint through; prCommand re-derives the role from the
-		// target repo's config (per-repo role map).
-		return prCommand(fp, rest) // rest = pr args after "portitor pr"
+		// Route through the same cobra `pr` command the CLI exposes, with the
+		// connection fingerprint injected as the actor identity — the shell
+		// dispatcher owns it here, not $PORTITOR_FINGERPRINT. rest = pr args
+		// after "portitor pr"; prRun re-derives the role from the target repo's
+		// config (per-repo role map).
+		return execSub(newPrCmd(func() string { return fp }), rest)
 	default:
 		fmt.Fprintln(os.Stderr, "portitor: command not allowed")
 		return 1
@@ -796,64 +726,56 @@ func deriveSlug(url string) string {
 
 // ---- init-repo ----
 
-func initRepo(args []string) int {
-	fs := flag.NewFlagSet("init-repo", flag.ContinueOnError)
-	bare := fs.String("bare", "", "path to the bare repo to create (required)")
-	def := fs.String("default", "main", "default branch")
-	upstream := fs.String("upstream", "", "upstream URL to mirror and forward to (optional)")
-	configPath := fs.String("config", "", "portitor config JSON for this repo (default: the registry, <repos.d>/<name>.json)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *bare == "" {
+func initRepoRun(bare, def, upstream, configPath string) int {
+	if bare == "" {
 		fmt.Fprintln(os.Stderr, "init-repo: --bare is required")
 		return 2
 	}
-	cfg := *configPath
+	cfg := configPath
 	if cfg == "" {
 		// The registry is the single canonical config identity: the same file
 		// the gate hooks, add-role, and the pr API read. A divergent default
 		// here is how role grants used to silently miss the gate.
-		name := strings.TrimSuffix(filepath.Base(*bare), ".git")
+		name := strings.TrimSuffix(filepath.Base(bare), ".git")
 		if !config.ValidName(name) {
-			fmt.Fprintf(os.Stderr, "init-repo: cannot derive a registry config name from bare path %q; pass --config explicitly\n", *bare)
+			fmt.Fprintf(os.Stderr, "init-repo: cannot derive a registry config name from bare path %q; pass --config explicitly\n", bare)
 			return 2
 		}
 		cfg = filepath.Join(config.ReposDir(), name+".json")
 	}
 
-	if err := git.Run("", "init", "--bare", "--initial-branch="+*def, *bare); err != nil {
+	if err := git.Run("", "init", "--bare", "--initial-branch="+def, bare); err != nil {
 		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
 		return 1
 	}
 
-	if *upstream != "" {
+	if upstream != "" {
 		// Provisioning must fail loudly, not bake an unverified repo: a
 		// swallowed remote-add / seed error leaves a gate that cannot forward.
-		if err := git.Run(*bare, "remote", "add", "upstream", *upstream); err != nil {
+		if err := git.Run(bare, "remote", "add", "upstream", upstream); err != nil {
 			fmt.Fprintf(os.Stderr, "init-repo: add upstream remote: %v\n", err)
 			return 1
 		}
-		if err := git.OutputNetworkRun(*bare, "fetch", "upstream"); err != nil {
+		if err := git.OutputNetworkRun(bare, "fetch", "upstream"); err != nil {
 			fmt.Fprintf(os.Stderr, "init-repo: fetch upstream: %v\n", err)
 			return 1
 		}
 		// Seed the default branch from upstream only if upstream has it (a fresh
 		// empty upstream legitimately does not).
-		hasDefault, err := refExists(*bare, "refs/remotes/upstream/"+*def)
+		hasDefault, err := refExists(bare, "refs/remotes/upstream/"+def)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "init-repo: check upstream default branch: %v\n", err)
 			return 1
 		}
 		if hasDefault {
-			if err := git.Run(*bare, "update-ref", "refs/heads/"+*def, "refs/remotes/upstream/"+*def); err != nil {
+			if err := git.Run(bare, "update-ref", "refs/heads/"+def, "refs/remotes/upstream/"+def); err != nil {
 				fmt.Fprintf(os.Stderr, "init-repo: seed default branch: %v\n", err)
 				return 1
 			}
 		}
 	}
 
-	if err := bakeHooks(*bare, cfg); err != nil {
+	if err := bakeHooks(bare, cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
 		return 1
 	}
@@ -876,7 +798,7 @@ func initRepo(args []string) int {
 	}
 
 	fmt.Printf("portitor: initialized bare repo %s (default=%s, config=%s%s)\n",
-		*bare, *def, cfg, upstreamNote(*upstream))
+		bare, def, cfg, upstreamNote(upstream))
 	return 0
 }
 
@@ -910,23 +832,17 @@ func bakeHooks(bare, cfg string) error {
 	return nil
 }
 
-// upgradeRepo re-bakes a provisioned repo's hook shims to the current version
+// upgradeRepoRun re-bakes a provisioned repo's hook shims to the current version
 // (idempotent), preserving the config path already baked in. It is the
 // re-provisioning path when the CLI's shim contract evolves.
-func upgradeRepo(args []string) int {
-	fs := flag.NewFlagSet("upgrade-repo", flag.ContinueOnError)
-	repo := fs.String("repo", "", "repository name (uses the registry paths)")
-	bareFlag := fs.String("bare", "", "explicit bare repo path (overrides --repo)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	bare := *bareFlag
+func upgradeRepoRun(repo, bareFlag string) int {
+	bare := bareFlag
 	if bare == "" {
-		if !config.ValidName(*repo) {
+		if !config.ValidName(repo) {
 			fmt.Fprintln(os.Stderr, "upgrade-repo: --repo <name> or --bare <path> required")
 			return 2
 		}
-		bare = filepath.Join(config.ReposRoot(), *repo+".git")
+		bare = filepath.Join(config.ReposRoot(), repo+".git")
 	}
 	cfg, ok := bakedHookConfig(bare)
 	if !ok {
@@ -941,28 +857,21 @@ func upgradeRepo(args []string) int {
 	return 0
 }
 
-// addRepo provisions a managed repo using the registry conventions: bare at
+// addRepoRun provisions a managed repo using the registry conventions: bare at
 // <repos-root>/<name>.git and per-repo config at <repos-dir>/<name>.json (placed
 // there first). It is init-repo with the paths derived from the repo name.
-func addRepo(args []string) int {
-	fs := flag.NewFlagSet("add-repo", flag.ContinueOnError)
-	name := fs.String("repo", "", "repository name (required)")
-	def := fs.String("default", "main", "default branch")
-	upstream := fs.String("upstream", "", "upstream URL to mirror and forward to")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if *name == "" {
+func addRepoRun(name, def, upstream string) int {
+	if name == "" {
 		fmt.Fprintln(os.Stderr, "add-repo: --repo is required")
 		return 2
 	}
-	cfg := filepath.Join(config.ReposDir(), *name+".json")
+	cfg := filepath.Join(config.ReposDir(), name+".json")
 	if _, err := os.Stat(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "add-repo: place the repo config at %s first\n", cfg)
 		return 1
 	}
-	bare := filepath.Join(config.ReposRoot(), *name+".git")
-	return initRepo([]string{"--bare", bare, "--default", *def, "--upstream", *upstream, "--config", cfg})
+	bare := filepath.Join(config.ReposRoot(), name+".git")
+	return initRepoRun(bare, def, upstream, cfg)
 }
 
 func upstreamNote(u string) string {
