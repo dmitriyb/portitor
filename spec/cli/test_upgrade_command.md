@@ -7,12 +7,12 @@ Tests for `UpgradeCommand` (`cmd/portitor/upgrade_test.go`). The command's own l
 ### 1. Embedded install.sh is byte-identical to the canonical one
 
 **Input**: the embedded `installScript` bytes versus the repo-root `install.sh`.
-**Expected**: byte-for-byte equal; otherwise the test fails with a "run `go generate ./cmd/portitor`" message. (`TestUpgradeEmbeddedInstallMatchesCanonical`.) This identity is the security argument: the script the binary runs is exactly the audited, signed installer, so there is nothing to fetch and nothing to substitute.
+**Expected**: byte-for-byte equal; otherwise the test fails with a "run `go generate ./cmd/portitor`" message. (`TestUpgradeEmbeddedMatchesReleased`.) This identity is the security argument: the script the binary runs is exactly the audited, signed installer, so there is nothing to fetch and nothing to substitute.
 
 ### 2. Help scopes to the binary, not the image
 
 **Input**: `upgrade --help`.
-**Expected**: exit 0; stdout lists the flags (`--check`, `--version`, `--rollback`, `--force`) and states that `upgrade` maintains the standalone binary only, with the container image rebuilt from the `Dockerfile`. (`TestUpgradeHelpScopesToBinaryNotImage`.)
+**Expected**: exit 0; stdout lists the flags (`--check`, `--version`, `--rollback`), describes the upgrade as `forward-only` (there is no `--force`), and states that `upgrade` maintains the standalone binary only, with the container image rebuilt from the `Dockerfile`. (`TestUpgradeHelpScopesToBinaryNotImage`.)
 
 ### 3. Fake-origin harness rides the Go test gate
 

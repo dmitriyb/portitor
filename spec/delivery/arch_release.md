@@ -24,31 +24,38 @@ with `README.md` and `LICENSE`. `checksum.name_template: checksums.txt` produces
 sha256 file over all four archives (GoReleaser's `checksum` block only ever produces this single
 combined file — per-artifact `.sha256` files are a workflow step, below).
 
-## Signing (minisign)
+## Signing (SSHSIG)
 
-`.goreleaser.yaml`'s `signs` block runs, once per archive:
+`.goreleaser.yaml`'s `signs` block runs `ssh-keygen -Y sign` (SSHSIG), once per archive:
 
 ```
-minisign -S -s "{{ .Env.MINISIGN_KEY_PATH }}" -m "${artifact}" -x "${signature}" -t "portitor {{ .Tag }}"
+ssh-keygen -Y sign -f "{{ .Env.SSH_SIGNING_KEY_PATH }}" -n file "${artifact}"
 ```
 
-`MINISIGN_KEY_PATH` is not the secret itself — the release workflow's "Write minisign secret key"
-step writes the `MINISIGN_SECRET_KEY` repository secret to `$RUNNER_TEMP/minisign.key` (`umask
-077`, so the file is created `0600`) and exports the path via `GITHUB_ENV`, then a later step
-(`if: always()`) removes it. The key material therefore never appears in a process argv (visible
-to any other process on the runner via `/proc`) or in a template-expanded command line that GitHub
-Actions might echo to a log. The public half is committed to README.md's Releases section, so a
-verifier can run `minisign -Vm <archive> -P <pubkey>` entirely offline.
+`-n file` is the SSHSIG namespace, domain-separating release-artifact signatures from git commit
+signatures (`-n git`) so a signature made under one namespace never verifies under the other.
+`ssh-keygen -Y sign` always writes `<artifact>.sig` next to the input (no flag redirects it), so
+`signature: "${artifact}.sig"` matches that fixed naming.
+
+`SSH_SIGNING_KEY_PATH` is not the secret itself — the release workflow's "Write SSH signing key"
+step writes the `SSH_SIGNING_KEY` repository secret to `$RUNNER_TEMP/ssh-signing.key`, `chmod 600`
+(ssh-keygen refuses a key with looser permissions), and exports the path via `GITHUB_ENV`, then a
+later step (`if: always()`) removes it. The key material therefore never appears in a process argv
+(visible to any other process on the runner via `/proc`) or in a template-expanded command line
+that GitHub Actions might echo to a log. The public half is committed to README.md's Releases
+section as an `allowed_signers` principal, so a verifier can run `ssh-keygen -Y verify` (the same
+verb and `-n file` namespace `install.sh` uses) entirely offline.
 
 Signing, the sha256 checksums, and the SLSA attestation (below) are three independent ways to
 trust a downloaded binary — deliberately redundant, not layered fallbacks; a verifier who trusts
-only one of the three still gets a real guarantee.
+only one of the three still gets a real guarantee. The same pipeline also SSHSIG-signs the
+published `install.sh` (`install.sh.sig`), so the installer itself is verifiable before it runs.
 
 ## Publish (GoReleaser → GitHub Release)
 
 `goreleaser release --clean` (invoked via `goreleaser/goreleaser-action`) creates the GitHub
 release itself from the `v*` tag and uploads the four archives, `checksums.txt`, and the four
-`.minisig` files. `release.prerelease: auto` in `.goreleaser.yaml` marks a tag containing a
+`.sig` files. `release.prerelease: auto` in `.goreleaser.yaml` marks a tag containing a
 pre-release suffix (e.g. `v0.1.0-rc.1`) as a GitHub pre-release automatically — no separate
 `workflow_dispatch` input to remember to set.
 
@@ -126,22 +133,23 @@ aren't independently executable artifacts). The workflow's `permissions: {id-tok
 attestations: write}` are what let this step mint a Sigstore-backed attestation from the job's
 OIDC identity; a verifier runs `gh attestation verify <archive> --owner <org>` and gets an
 independent, GitHub-native chain of custody back to *this exact workflow run* — distinct from, and
-not dependent on, the minisign signature.
+not dependent on, the SSHSIG signature.
 
 ## Local proof (no tag, no CI, no secrets)
 
 Every piece above runs identically outside CI:
 
 ```bash
-export MINISIGN_KEY_PATH=/path/to/a/local/minisign.key   # any key, e.g. `minisign -G -W`
+# any ed25519 key, e.g. `ssh-keygen -t ed25519 -f /tmp/ssh-signing.key -N ""`
+export SSH_SIGNING_KEY_PATH=/path/to/a/local/ssh-signing.key
 goreleaser release --snapshot --clean
 ./scripts/generate-manifest.sh dist v0.0.0-snapshot-test ok > dist/manifest.json
 ```
 
 `--snapshot` skips the "must be on a tag" / "must publish" checks GoReleaser normally enforces, so
 the full build → archive → sign → checksum chain runs on an uncommitted or untagged tree. This is
-precisely how this module's local proof was captured: a throwaway minisign keypair, a snapshot
-release, `minisign -Vm` against the resulting signature, `sha256sum -c` against `checksums.txt`,
+precisely how this module's local proof was captured: a throwaway ed25519 signing keypair, a
+snapshot release, `ssh-keygen -Y verify` against the resulting `.sig`, `sha256sum -c` against `checksums.txt`,
 and `generate-manifest.sh` run against the real `dist/artifacts.json`/`metadata.json` it produced
 — not a hypothetical shape guessed in advance.
 
