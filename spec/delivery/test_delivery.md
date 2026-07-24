@@ -19,14 +19,14 @@ CI enforces on every run and what was proven locally, once, against the real too
    invoking GoReleaser, so a release build never ships from a red tree even if CI's own gate was
    somehow bypassed for the tagged commit.
 5. **Self-update proofs (ride `go test ./...`)** — two delivery-specific checks run under the same suite the fast gate already enforces, so they gate merge like everything else:
-   - **Embedded == released byte-identity** — `TestUpgradeEmbeddedInstallMatchesCanonical` fails if `cmd/portitor/install.sh` (the embedded copy) ever diverges from the canonical repo-root `install.sh`. This is the invariant the whole "nothing to substitute" security argument rests on; a drift is caught at merge, not at release.
-   - **Fake-origin upgrade harness** — `TestUpgradeFakeOriginHarness` runs `scripts/install_upgrade_test.sh`, which drives the real `install.sh` end to end against a throwaway release origin (served over `file://` via the `PORTITOR_API_BASE`/`PORTITOR_DL_BASE` origin hooks) and a throwaway signing key baked into a temp copy of the script. It exercises resolve → download → `ssh-keygen -Y verify` → self-replace of a running binary, and the paths that matter most: the fail-closed path (a tampered artifact must leave the target untouched and exit non-zero), `--rollback`, the downgrade guard (± `--force`), `--check`, `--version` pinning, first-install, and RequireRoot (no auto-sudo). `sh -n` proves only that the script parses; the harness proves the logic. It self-skips only when a tool it needs is absent from the environment.
+   - **Embedded == released byte-identity** — `TestUpgradeEmbeddedMatchesReleased` fails if `cmd/portitor/install.sh` (the embedded copy) ever diverges from the canonical repo-root `install.sh`. This is the invariant the whole "nothing to substitute" security argument rests on; a drift is caught at merge, not at release.
+   - **Fake-origin upgrade harness** — `TestUpgradeFakeOriginHarness` runs `scripts/install_upgrade_test.sh`, which drives the real `install.sh` end to end against a throwaway release origin (served over `file://` via the `PORTITOR_API_BASE`/`PORTITOR_DL_BASE` origin hooks) and a throwaway signing key baked into a temp copy of the script. It exercises resolve → download → `ssh-keygen -Y verify` → self-replace of a running binary, and the paths that matter most: the fail-closed path (a tampered artifact must leave the target untouched and exit non-zero), `--rollback`, the forward-only guard (a resolved latest older than installed is hard-refused and NOT overridable — a stray `--force` is an unknown option; an explicitly named older `--version` installs with a notice), `--check` (which only warns, still exiting 0, when latest is older than installed), `--version` pinning, first-install, and RequireRoot (no auto-sudo). `sh -n` proves only that the script parses; the harness proves the logic. It self-skips only when a tool it needs is absent from the environment.
 
 ## What was proven locally (one-time, this module's local proof)
 
-Run as `goreleaser release --snapshot --clean` against an untagged tree, with a throwaway minisign
-keypair (`minisign -G -W`, generated solely for this proof — never committed, never used for a
-real release):
+Run as `goreleaser release --snapshot --clean` against an untagged tree, with a throwaway ed25519
+signing keypair (`ssh-keygen -t ed25519`, generated solely for this proof — never committed, never
+used for a real release):
 
 1. **Cross-arch build succeeds** — all four `goos`×`goarch` combinations (`linux_amd64`,
    `linux_arm64`, `darwin_amd64`, `darwin_arm64`) compile from `./cmd/portitor` with
@@ -37,9 +37,10 @@ real release):
    `portitor version` printed the snapshot version, the real commit SHA, and the build timestamp
    GoReleaser injected — confirming `main.version`/`main.commit`/`main.date` in
    `cmd/portitor/version.go` receive exactly what `-ldflags -X` sends them.
-3. **Signing round-trips** — `minisign -Vm <archive> -P <pubkey>` verified against the snapshot's
-   own public key for a sampled archive; "Signature and comment signature verified" with the
-   expected trusted comment (`portitor <tag>`).
+3. **Signing round-trips** — `ssh-keygen -Y verify -n file` (against an `allowed_signers` line
+   holding the snapshot's own public key) verified the `.sig` for a sampled archive as
+   "Good \"file\" signature", confirming the SSHSIG sign/verify path GoReleaser's `signs` block and
+   `install.sh` share.
 4. **Checksums are internally consistent** — `sha256sum -c checksums.txt` against all four
    archives in `dist/`, run from within `dist/`, reported `OK` for all four.
 5. **Manifest generation matches reality** — `scripts/generate-manifest.sh dist <ref> ok` was run

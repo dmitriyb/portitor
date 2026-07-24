@@ -8,7 +8,7 @@
 | `portitor add-role --repo <name> --role <r> --fingerprint SHA256:… [--pub <file>]` | operator | bind a fingerprint→role (+ trust its key) |
 | `portitor upgrade-repo --repo <name>` | operator | re-bake hook shims to the current version |
 | `portitor reconcile --repo <name>` | operator | re-forward accepted branches after a forward failure |
-| `portitor upgrade [--check] [--version vX.Y.Z] [--rollback] [--force]` | operator | update the standalone binary to a newer signed release |
+| `portitor upgrade [--check] [--version vX.Y.Z] [--rollback]` | operator | update the standalone binary forward to the latest signed release |
 | `portitor validate-config [--config <path>]` | operator / boot | fail fast on a missing/invalid config |
 | `portitor shell <fingerprint>` | sshd forced command | dispatch to git-pack or the `pr` API |
 | `portitor pr <action> --repo <name> --pr <n>` | the agent (via SSH) | one role-validated GitHub action |
@@ -34,14 +34,15 @@ The full mediation model — the `portitor shell` dispatch table, auto-open-PR o
 
 ## Upgrading the binary
 
-`portitor upgrade` updates the installed **standalone binary** to a newer signed release, in place.
+`portitor upgrade` updates the installed **standalone binary** to the latest signed release, in place. Upgrade is **forward-only**: with no flag it resolves the latest release and moves toward it.
 It does not reimplement the update: it embeds the same signed `install.sh` the README documents and runs it against the path of the currently-running binary, so the new release is resolved, downloaded, and SSHSIG-verified by exactly that audited installer — the embedded copy is byte-identical to the standalone `install.sh` (a `go test` check enforces that identity).
 The swap is safe over a running binary: the installer moves the current binary aside and `rename(2)`s the new one into place (never a write over the running file, which would hit `ETXTBSY` on Linux), keeping the displaced binary as `<path>.bak`.
 
-- `--check` / `--dry-run` — report the installed version versus the latest and change nothing.
-- `--version vX.Y.Z` — pin a specific release instead of the latest.
+If the resolved latest is **older** than the installed version, `upgrade` hard-refuses and no flag overrides it — a latest that moved backward is a rollback anomaly (a compromised origin serving an old but validly-signed release as "latest"). A signature proves authenticity, not freshness. To install an older release deliberately, name it with `--version`, which installs that exact release in any direction with no anomaly guard.
+
+- `--check` / `--dry-run` — report the latest release and change nothing. When the latest is older than installed it prints an anomaly **warning** but still exits 0 (its job is to report, not to gate).
+- `--version vX.Y.Z` — install that exact release in **any** direction (including older than installed), instead of the forward-only latest.
 - `--rollback` — restore `<path>.bak` (the binary displaced by the last upgrade).
-- `--force` — allow a move to an **older** version; by default a downgrade is refused, because a signature proves authenticity, not freshness.
 
 If the target directory is not writable, `upgrade` prints a "re-run with elevated privileges" message and stops — it never silently re-invokes `sudo`.
 

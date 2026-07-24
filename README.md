@@ -83,7 +83,7 @@ Each release also carries a consolidated `checksums.txt`, one `.sha256` per arch
 - **Primary** verifies both the install script and the binary it fetches, end to end — `download → verify → run`, never a piped script: a piped `curl … | sh` executes as it streams and cannot verify itself before running, so verification has to wrap the download from outside the stream, which is exactly why the primary path is not a one-liner pipe.
 - **Maximal** gives you the strongest per-artifact check for a single file, with no script in between.
 - The trust anchor in both cases is the public key **copied from this README** — that defeats tampering of the download in transit; the residual risk is being sent to a look-alike or phishing copy of this repository, closed by using the known repository URL and by pinning the public key **once** — copy it a single time, then verify every future release against that pinned copy rather than re-copying it from wherever you happen to land.
-- Signatures and attestations give **authenticity, not freshness**: a channel attacker who can intercept your download could still steer you to a genuine-but-older, vulnerable release (a downgrade); this applies to every channel above equally, and there is no minimum-version floor enforced today — note it as a residual risk rather than a solved one.
+- Signatures and attestations give **authenticity, not freshness**: a channel attacker who can intercept your download could still steer you to a genuine-but-older, vulnerable release (a downgrade); this applies to every channel above equally at *first install*, where there is no installed version to floor against — note it as a residual risk rather than a solved one. For *updates* this is closed: `portitor upgrade` is forward-only and hard-refuses (non-overridably) a resolved latest that is older than what is installed (see Upgrading).
 
 ### Public key
 
@@ -100,8 +100,8 @@ See `docs/deploy.md` for the CLI-vs-image split in full.
 ### Upgrading
 
 An installed binary updates itself with `portitor upgrade`, which embeds the same signed `install.sh` above and runs it against the running binary's own path — same resolve → download → SSHSIG-verify, then a safe in-place swap (move-aside + `rename(2)`, never a write over the running file), keeping the previous binary as `<path>.bak`.
-`--check` reports current-vs-latest without changing anything, `--version vX.Y.Z` pins a release, and `--rollback` restores the backup.
-A downgrade is refused unless `--force` — a signature proves authenticity, not freshness.
+Upgrade is **forward-only**: it resolves the latest release and moves toward it, and hard-refuses (non-overridable) a resolved latest that is *older* than the installed version — a signature proves authenticity, not freshness, so a latest that moved backward is treated as a compromised-origin rollback anomaly.
+`--check` reports the latest without changing anything (warning, not refusing, when latest is older than installed), `--version vX.Y.Z` installs an exact release in any direction (the deliberate path to an older release), and `--rollback` restores the backup.
 `upgrade` maintains the standalone binary only; the container image is rebuilt from the `Dockerfile`, as above.
 See [`docs/commands.md`](docs/commands.md) for the full flag reference.
 
