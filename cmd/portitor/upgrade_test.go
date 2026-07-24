@@ -27,6 +27,63 @@ func TestUpgradeEmbeddedMatchesReleased(t *testing.T) {
 	}
 }
 
+// TestUpgradeChildEnvStripsAmbientVERSION proves the child env never inherits an
+// ambient VERSION — nor the test-only origin seams PORTITOR_API_BASE /
+// PORTITOR_DL_BASE — from the operator's shell. The embedded install.sh keys the
+// explicit-release path vs the forward-only latest path solely on whether VERSION
+// is set, so a stray VERSION (a very common name) would flip a plain `upgrade`
+// onto the explicit path and silently defeat the non-overridable forward-only
+// anomaly refusal; an ambient origin base would redirect where a production
+// `upgrade` fetches from. upgradeChildEnv strips all three and sets VERSION only
+// from the pin.
+func TestUpgradeChildEnvStripsAmbientVERSION(t *testing.T) {
+	t.Setenv("VERSION", "9.9.9")
+	t.Setenv("PORTITOR_API_BASE", "http://attacker.example/api")
+	t.Setenv("PORTITOR_DL_BASE", "http://attacker.example/dl")
+
+	countVERSION := func(env []string) (n int, entry string) {
+		for _, e := range env {
+			if strings.HasPrefix(e, "VERSION=") {
+				n++
+				entry = e
+			}
+		}
+		return n, entry
+	}
+
+	// hasBase reports whether any origin-base override survived into the env.
+	hasBase := func(env []string) bool {
+		for _, e := range env {
+			if strings.HasPrefix(e, "PORTITOR_API_BASE=") || strings.HasPrefix(e, "PORTITOR_DL_BASE=") {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("no pin: the ambient VERSION is stripped, none survives", func(t *testing.T) {
+		env := upgradeChildEnv("")
+		n, entry := countVERSION(env)
+		if n != 0 {
+			t.Errorf("ambient VERSION leaked onto the latest path: found %d (%q), want 0", n, entry)
+		}
+		if hasBase(env) {
+			t.Errorf("an ambient origin base leaked onto the latest path: %v", env)
+		}
+	})
+
+	t.Run("pinned: exactly the pinned VERSION is present, not the ambient one", func(t *testing.T) {
+		env := upgradeChildEnv("v1.2.3")
+		n, entry := countVERSION(env)
+		if n != 1 || entry != "VERSION=v1.2.3" {
+			t.Errorf("child env VERSION = %d entr(y/ies) (%q), want exactly VERSION=v1.2.3 (not the ambient 9.9.9)", n, entry)
+		}
+		if hasBase(env) {
+			t.Errorf("an ambient origin base leaked onto the explicit path: %v", env)
+		}
+	})
+}
+
 // TestUpgradeHelpScopesToBinaryNotImage locks the documented scope into the
 // command's own help: upgrade replaces the standalone operator binary and
 // explicitly does NOT touch the container image (a separate Dockerfile artifact).
@@ -40,7 +97,7 @@ func TestUpgradeHelpScopesToBinaryNotImage(t *testing.T) {
 		t.Fatalf("upgrade --help: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"upgrade", "--check", "--version", "--rollback", "--force", "container image", "Dockerfile"} {
+	for _, want := range []string{"upgrade", "--check", "--version", "--rollback", "forward-only", "container image", "Dockerfile"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("upgrade help missing %q:\n%s", want, got)
 		}

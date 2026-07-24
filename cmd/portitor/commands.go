@@ -211,32 +211,41 @@ func newUpgradeCmd() *cobra.Command {
 	var o upgradeOptions
 	cmd := &cobra.Command{
 		Use:   "upgrade",
-		Short: "Update the installed portitor binary to a newer signed release",
-		Long: `Update the standalone portitor binary in place to a newer signed release.
+		Short: "Update the installed portitor binary forward to the latest signed release",
+		Long: `Update the standalone portitor binary in place to the latest signed release.
+Upgrade is forward-only: it resolves the latest release and moves toward it.
 
 It reuses the same signed install.sh the README documents — embedded in this
 binary, run against the path of the currently-running binary — so the update is
 resolved, downloaded, and SSHSIG-verified by exactly the audited installer, then
-swapped in safely (move-aside + rename, never a write over the running file).
+swapped in safely (move-aside + rename, never a write over the running file),
+keeping the displaced binary at <path>.bak.
+
+If the resolved latest is OLDER than the installed version, upgrade hard-refuses
+and no flag overrides it — a latest that moved backward is a rollback anomaly
+(a compromised origin serving an old but validly-signed release as "latest"). To
+install an older release deliberately, name it with --version, which installs
+that exact release in any direction with no anomaly guard.
+
+  portitor upgrade                 upgrade forward to the latest release
+  portitor upgrade --check         report availability only; change nothing
+  portitor upgrade --version vX.Y.Z install that exact release, any direction
+  portitor upgrade --rollback      restore the pre-upgrade binary from <path>.bak
 
 This updates the standalone operator binary only (the one also used for
 add-role/validate-config/reconcile). The container image (gate + egress) is a
 separate artifact rebuilt from the Dockerfile — upgrade does not touch it; see
-docs/deploy.md.
-
-A signature proves authenticity, not freshness: a move to an older version is
-refused unless --force.`,
+docs/deploy.md.`,
 		GroupID: cli.GroupProvisioning,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return exitErr(upgradeRun(o, cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
-	cmd.Flags().BoolVar(&o.check, "check", false, "report current vs latest and change nothing")
+	cmd.Flags().BoolVar(&o.check, "check", false, "report the latest release and change nothing (warns, does not refuse, when latest is older than installed)")
 	cmd.Flags().BoolVar(&o.check, "dry-run", false, "alias for --check")
-	cmd.Flags().StringVar(&o.pinned, "version", "", "pin the target release (e.g. v0.1.2) instead of the latest")
+	cmd.Flags().StringVar(&o.pinned, "version", "", "install a specific release (vX.Y.Z), any direction, instead of the forward-only latest")
 	cmd.Flags().BoolVar(&o.rollback, "rollback", false, "restore the pre-upgrade binary from the .bak left by the last upgrade")
-	cmd.Flags().BoolVar(&o.force, "force", false, "allow a downgrade to an older version")
 	return cmd
 }
 

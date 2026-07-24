@@ -18,7 +18,7 @@
 #     documented in the README's install block.
 #   * upgrade (--upgrade --target <path>) — replace an already-installed binary
 #     in place, safely (move-aside + rename, never a write over the running
-#     file), with a downgrade guard and a rollback path. `portitor upgrade`
+#     file), with a forward-only version guard and a rollback path. `portitor upgrade`
 #     embeds this same script and drives it in this mode; the embedded copy is,
 #     for a given release, byte-identical to the standalone install.sh.
 #
@@ -37,6 +37,10 @@ set -eu
 
 OWNER="dmitriyb"
 REPO="portitor"
+
+# The tool/binary name, threaded through every runtime path and diagnostic
+# below so the installer names itself in exactly one place.
+TOOL="portitor"
 
 # The principal string used both here and in the README's allowed_signers
 # line — it must match exactly, or verification fails even with the right
@@ -73,7 +77,7 @@ need() {
 # re-running a self-replace as root is a surprise, so we detect the condition
 # and tell the operator to re-run with elevated privileges instead.
 require_writable() {
-  fail "$1 is not writable by the current user — re-run with elevated privileges (e.g. run 'portitor upgrade' as the owner of $1, or via sudo)"
+  fail "$1 is not writable by the current user — re-run with elevated privileges (e.g. run '$TOOL upgrade' as the owner of $1, or via sudo)"
 }
 
 # binary_version PATH -> prints the version token from `<PATH> version`
@@ -81,7 +85,7 @@ require_writable() {
 # binary cannot be run or does not print the expected line.
 binary_version() {
   _line=$("$1" version 2>/dev/null | head -n1) || _line=""
-  _v="${_line#portitor }"
+  _v="${_line#$TOOL }"
   _v="${_v%% *}"
   printf '%s' "$_v"
 }
@@ -144,13 +148,20 @@ do_rollback() {
   [ -w "$_dir" ] || require_writable "$_dir"
   mv -f "$_bak" "$_t" || fail "rollback failed: could not restore ${_bak} -> ${_t}"
   _rv=$(binary_version "$_t")
-  echo "portitor: rolled back ${_t} to ${_rv:-the previous binary}" >&2
+  # Render the restored version v-prefixed (single leading v); fall back to a
+  # plain phrase when the restored binary reports no version.
+  _rvd="the previous binary"
+  [ -n "$_rv" ] && _rvd="v${_rv#v}"
+  echo "$TOOL: rolled back ${_t} to ${_rvd}" >&2
 }
 
 # --- parse flags (first-install mode takes none; upgrade mode is opt-in) ---
+# There is no --force: the forward-only anomaly refusal on the latest path is
+# not overridable (an operator who deliberately wants an older release names it
+# with --version, which installs any release in any direction). A stray --force
+# therefore falls through to the `-*` arm and is rejected as an unknown option.
 MODE=install
 CHECK=0
-FORCE=0
 ROLLBACK=0
 TARGET=""
 CURRENT=""
@@ -161,7 +172,6 @@ while [ $# -gt 0 ]; do
     --target) shift; TARGET="${1:-}" ;;
     --target=*) TARGET="${1#--target=}" ;;
     --check | --dry-run) CHECK=1 ;;
-    --force) FORCE=1 ;;
     --rollback) ROLLBACK=1 ;;
     --current) shift; CURRENT="${1:-}" ;;
     --current=*) CURRENT="${1#--current=}" ;;
@@ -189,9 +199,16 @@ if [ "$ROLLBACK" -eq 1 ]; then
 fi
 
 # --- resolve the release tag ---
+# EXPLICIT_VERSION records whether VERSION named an exact release: it is the
+# whole latest-vs-explicit distinction the upgrade-mode guard below turns on.
+# VERSION unset ⇒ the forward-only latest path (resolve GitHub's "latest
+# release" and only ever move toward it); VERSION set ⇒ an operator-named
+# release installed in any direction, with no anomaly refusal.
 if [ -n "${VERSION:-}" ]; then
   tag="$VERSION"
+  EXPLICIT_VERSION=1
 else
+  EXPLICIT_VERSION=""
   api_url="${API_BASE}/repos/${OWNER}/${REPO}/releases/latest"
   # grep (no -m1) + head: read the body to EOF so curl can't abort with (56).
   tag=$(curl -fsSL "$api_url" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
@@ -204,67 +221,94 @@ os=$(uname -s)
 case "$os" in
   Linux) goos=linux ;;
   Darwin) goos=darwin ;;
-  *) fail "unsupported OS: $os (portitor ships linux and darwin binaries only)" ;;
+  *) fail "unsupported OS: $os ($TOOL ships linux and darwin binaries only)" ;;
 esac
 
 arch=$(uname -m)
 case "$arch" in
   x86_64 | amd64) goarch=amd64 ;;
   arm64 | aarch64) goarch=arm64 ;;
-  *) fail "unsupported architecture: $arch (portitor ships amd64 and arm64 binaries only)" ;;
+  *) fail "unsupported architecture: $arch ($TOOL ships amd64 and arm64 binaries only)" ;;
 esac
 
 # --- upgrade mode: decide whether to proceed BEFORE downloading anything ---
+# The version guard is forward-only. Equal → already up to date, exit 0 (either
+# path). Older than the installed version splits by path:
+#   - latest path (VERSION unset): a resolved latest that moved BACKWARD is a
+#     rollback anomaly (a compromised origin serving an old but validly-signed
+#     release as "latest"). Hard-refuse, non-overridable — there is no flag for
+#     it. --check/--dry-run only REPORTS the anomaly and still exits 0 (its job
+#     is to report, not to gate).
+#   - explicit-version path (VERSION set): the operator named this release, so
+#     there is no untrusted "latest" to attack — install it in any direction,
+#     printing an "older than installed, as explicitly requested" notice.
+# A dev/unstamped current version cannot be ordered against a release tag; on
+# the latest path that means the forward-only check cannot run — warn and
+# proceed rather than block (the binary is still SSHSIG-verified either way).
 if [ "$MODE" = upgrade ]; then
   need cut
   [ -n "$TARGET" ] || fail "--upgrade requires --target <path> (the binary to replace)"
   cur="$CURRENT"
   [ -n "$cur" ] || cur=$(binary_version "$TARGET")
+  # cmp stays empty when the current version is unknown (unreadable target or a
+  # dev/unstamped build) — a version that cannot be ordered against a release tag.
   cmp=""
-  [ -n "$cur" ] && cmp=$(ver_cmp "$version" "$cur")
+  if [ -n "$cur" ] && [ "$cur" != "dev" ]; then
+    cmp=$(ver_cmp "$version" "$cur")
+  fi
 
   if [ "$CHECK" -eq 1 ]; then
-    # --check / --dry-run: report only, change nothing on disk.
-    if [ -z "$cur" ]; then
-      echo "portitor: latest ${version} (current version could not be determined)" >&2
+    # --check / --dry-run: report availability only, change nothing on disk. It
+    # exits 0 whenever it could resolve the latest — including when latest is
+    # older than installed, which it flags as an anomaly WARNING (still exit 0).
+    if [ -z "$cmp" ]; then
+      echo "$TOOL: latest v${version} (current version could not be determined)" >&2
     elif [ "$cmp" -eq 0 ]; then
-      echo "portitor: up to date (${cur})" >&2
+      echo "$TOOL: up to date (v${cur#v})" >&2
     elif [ "$cmp" -gt 0 ]; then
-      echo "portitor: update available: ${cur} -> ${version}" >&2
+      echo "$TOOL: update available: v${cur#v} -> v${version}" >&2
+    elif [ -n "$EXPLICIT_VERSION" ]; then
+      echo "$TOOL: ${tag} is older than the installed v${cur#v}; would install it as explicitly requested" >&2
     else
-      echo "portitor: current ${cur} is newer than latest ${version}" >&2
+      echo "$TOOL: WARNING: resolved latest ${tag} is OLDER than the installed v${cur#v} — anomalous (the origin may be serving an old release as latest); a real upgrade would refuse" >&2
     fi
     exit 0
   fi
 
-  if [ -n "$cur" ]; then
-    if [ "$cmp" -eq 0 ]; then
-      echo "portitor: already up to date (${cur})" >&2
-      exit 0
+  if [ -z "$cmp" ]; then
+    # dev/unknown current: cannot order it against the resolved release. On the
+    # latest path, note that the forward-only check is skipped; on the explicit
+    # path there is nothing to order — just install the named release.
+    [ -n "$EXPLICIT_VERSION" ] || \
+      echo "$TOOL: installed version is unknown (dev build); cannot order it against the resolved latest ${tag} — proceeding without the forward-only check" >&2
+  elif [ "$cmp" -eq 0 ]; then
+    echo "$TOOL upgrade: already at v${version}; nothing changed" >&2
+    exit 0
+  elif [ "$cmp" -lt 0 ]; then
+    if [ -n "$EXPLICIT_VERSION" ]; then
+      echo "$TOOL: installing ${tag}, older than the installed v${cur#v}, as explicitly requested" >&2
+    else
+      fail "resolved latest ${tag} is older than the installed v${cur#v} — refusing (a rollback anomaly: the origin may be serving an old release as latest); this is not overridable. To install an older release deliberately, name it: $TOOL upgrade --version ${tag}"
     fi
-    if [ "$cmp" -lt 0 ] && [ "$FORCE" -ne 1 ]; then
-      fail "refusing to downgrade ${cur} -> ${version}: a signature proves authenticity, not freshness — pass --force to override"
-    fi
-  else
-    echo "portitor: warning: could not determine the current version of ${TARGET}; proceeding without the downgrade guard" >&2
   fi
+  # cmp > 0 (newer, on either path): proceed.
 
   # Fail fast on an unwritable target directory, before spending a download.
   _tdir=$(dirname "$TARGET")
   [ -w "$_tdir" ] || require_writable "$_tdir"
 elif [ "$CHECK" -eq 1 ]; then
   # --check without --upgrade: report the resolved latest, install nothing.
-  echo "portitor: latest ${version}" >&2
+  echo "$TOOL: latest v${version}" >&2
   exit 0
 fi
 
-archive="portitor_${version}_${goos}_${goarch}.tar.gz"
+archive="${TOOL}_${version}_${goos}_${goarch}.tar.gz"
 base_url="${DL_BASE}/${OWNER}/${REPO}/releases/download/${tag}"
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT INT TERM
 
-echo "portitor installer: fetching ${archive} (${tag})" >&2
+echo "$TOOL installer: fetching ${archive} (${tag})" >&2
 curl -fsSL "${base_url}/${archive}" -o "${workdir}/${archive}" \
   || fail "download failed: ${base_url}/${archive}"
 curl -fsSL "${base_url}/${archive}.sig" -o "${workdir}/${archive}.sig" \
@@ -281,24 +325,28 @@ if ! ssh-keygen -Y verify \
   <"${workdir}/${archive}" >&2; then
   fail "signature verification FAILED for ${archive} — refusing to install an unverified binary"
 fi
-echo "portitor installer: signature verified" >&2
+echo "$TOOL installer: signature verified" >&2
 
-tar -xzf "${workdir}/${archive}" -C "$workdir" portitor \
-  || fail "failed to extract the portitor binary from ${archive}"
-chmod 755 "${workdir}/portitor"
+tar -xzf "${workdir}/${archive}" -C "$workdir" "$TOOL" \
+  || fail "failed to extract the $TOOL binary from ${archive}"
+chmod 755 "${workdir}/$TOOL"
 
 if [ "$MODE" = upgrade ]; then
-  self_replace "$TARGET" "${workdir}/portitor"
-  echo "portitor: upgraded ${cur:-unknown} -> ${version} at ${TARGET}" >&2
+  self_replace "$TARGET" "${workdir}/$TOOL"
+  # Render the from-version v-prefixed to match the release-tag form of the
+  # to-version; "unknown" when the current version could not be determined.
+  cur_disp="unknown"
+  [ -n "$cur" ] && cur_disp="v${cur#v}"
+  echo "$TOOL: upgraded ${cur_disp} -> v${version} at ${TARGET}" >&2
   "$TARGET" version >&2 || true
 else
   if [ -w "$INSTALL_DIR" ]; then
-    install -m 0755 "${workdir}/portitor" "${INSTALL_DIR}/portitor"
+    install -m 0755 "${workdir}/$TOOL" "${INSTALL_DIR}/$TOOL"
   else
-    echo "portitor installer: ${INSTALL_DIR} is not writable, retrying with sudo" >&2
+    echo "$TOOL installer: ${INSTALL_DIR} is not writable, retrying with sudo" >&2
     need sudo
-    sudo install -m 0755 "${workdir}/portitor" "${INSTALL_DIR}/portitor"
+    sudo install -m 0755 "${workdir}/$TOOL" "${INSTALL_DIR}/$TOOL"
   fi
-  echo "portitor installed to ${INSTALL_DIR}/portitor" >&2
-  "${INSTALL_DIR}/portitor" version || true
+  echo "$TOOL installed to ${INSTALL_DIR}/$TOOL" >&2
+  "${INSTALL_DIR}/$TOOL" version || true
 fi
