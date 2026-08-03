@@ -188,6 +188,7 @@ var topLevelKeys = map[string]bool{
 	"format_version":                  true,
 	"default_branch":                  true,
 	"allowed_signers":                 true,
+	"allowed_committer_emails":        true,
 	"roles":                           true,
 	"content_rules":                   true,
 	"role_rules":                      true,
@@ -311,6 +312,11 @@ func Validate(s Settings) []string {
 		}
 		if role == "" {
 			problems = append(problems, fmt.Sprintf("roles[%q] has an empty role name", fp))
+		}
+	}
+	for i, e := range s.AllowedCommitterEmails {
+		if e == "" {
+			problems = append(problems, fmt.Sprintf("allowed_committer_emails[%d] is empty (an empty entry can never match a committer email)", i))
 		}
 	}
 	if len(s.RetiredRoleRules) > 0 {

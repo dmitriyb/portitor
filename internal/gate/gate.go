@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/git"
@@ -99,6 +100,13 @@ type Config struct {
 	// Roles maps a signer key fingerprint (as git reports it via %GF, e.g.
 	// "SHA256:...") to a role name. Unmapped signers have the empty role.
 	Roles map[string]string `json:"roles"`
+	// AllowedCommitterEmails, when non-empty, requires every introduced
+	// commit's committer email (%ce) to be one of these values, compared
+	// byte-exact. Empty disables the check. The signature check is key-based,
+	// so without this a commit carrying a placeholder email signs fine and
+	// lands, then surfaces as unverifiable on a forge that ties signature
+	// verification to a registered account email.
+	AllowedCommitterEmails []string `json:"allowed_committer_emails"`
 	// Content configures the content-protection rule families (structural
 	// file-operation rules + semantic record-transition rules). See
 	// spec/gate/arch_content_rules.md.
@@ -204,9 +212,20 @@ func Check(repoDir string, updates []RefUpdate, cfg Config) ([]Violation, error)
 			// Rule: every introduced commit must be signed by an allowed signer.
 			// A failure of the verification subprocess itself is an operational
 			// error (push rejected), distinct from a signature verdict.
-			status, fp, _, err := commitSig(repoDir, c, cfg.AllowedSigners)
+			status, fp, _, email, err := commitSig(repoDir, c, cfg.AllowedSigners)
 			if err != nil {
 				return nil, err
+			}
+			// Rule: the committer email must be on the allowlist (when one is
+			// configured). Independent of the signature verdict — an unsigned
+			// commit with a bad email yields both violations, so the agent
+			// fixes everything in one correction pass.
+			if len(cfg.AllowedCommitterEmails) > 0 && !slices.Contains(cfg.AllowedCommitterEmails, email) {
+				vs = append(vs, Violation{
+					Ref:    u.Ref,
+					Rule:   "committer-email-not-allowed",
+					Detail: fmt.Sprintf("commit %s has committer email %q, not in allowed_committer_emails", shortSHA(c), email),
+				})
 			}
 			if status != "G" {
 				// Surface the offending key's fingerprint when git reported one
@@ -274,25 +293,26 @@ func newCommits(repoDir string, u RefUpdate) ([]string, error) {
 
 // commitSig returns git's signature verdict for a commit: status is the %G? code
 // ("G" good+trusted, "U" good+untrusted, "B" bad, "N" none, "E" error), fingerprint
-// is %GF (e.g. "SHA256:..."), and signer is %GS (the matched principal).
+// is %GF (e.g. "SHA256:..."), signer is %GS (the matched principal), and email is
+// %ce (the committer email, consumed by the email-allowlist rule).
 //
 // The verification runs hermetically with the allowed-signers trust root pinned
 // unconditionally: an empty allowedSigners path makes git report every signature
 // as untrusted (%G? == U), so a missing trust root fails closed — it never falls
 // back to an ambient allowedSignersFile from machine config. A failure of the
 // subprocess itself is returned as err, distinct from a signature verdict.
-func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer string, err error) {
+func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer, email string, err error) {
 	out, err := git.OutputHermetic(repoDir,
 		"-c", "gpg.ssh.allowedSignersFile="+allowedSigners,
-		"show", "-s", "--format=%G?%n%GF%n%GS", sha)
+		"show", "-s", "--format=%G?%n%GF%n%GS%n%ce", sha)
 	if err != nil {
-		return "", "", "", fmt.Errorf("signature check for %s: %w", shortSHA(sha), err)
+		return "", "", "", "", fmt.Errorf("signature check for %s: %w", shortSHA(sha), err)
 	}
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	for len(lines) < 3 {
+	for len(lines) < 4 {
 		lines = append(lines, "")
 	}
-	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2]), nil
+	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2]), strings.TrimSpace(lines[3]), nil
 }
 
 // staleBase reports whether newSHA fails to contain the current default-branch tip
@@ -357,7 +377,7 @@ func SignerFingerprints(repoDir, base, tip, allowedSigners string) (map[string]b
 	}
 	fps := make(map[string]bool)
 	for _, c := range commits {
-		_, fp, _, err := commitSig(repoDir, c, allowedSigners)
+		_, fp, _, _, err := commitSig(repoDir, c, allowedSigners)
 		if err != nil {
 			return nil, err
 		}

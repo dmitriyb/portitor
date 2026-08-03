@@ -19,6 +19,11 @@
     },
     {
       "type": "functional",
+      "title": "Restrict committer emails to an operator allowlist (opt-in)",
+      "description": "When allowed_committer_emails is non-empty, each commit an update introduces must carry a committer email (git %ce) from the list; any other email is a 'committer-email-not-allowed' violation naming the email. Evaluated per new commit independently of the signature verdict, so one correction pass fixes both. Empty or absent list disables the check. Entries are opaque strings compared byte-exact — which addresses verify on which forge is the operator's business."
+    },
+    {
+      "type": "functional",
       "title": "Attribute each commit to a role by signing-key fingerprint",
       "description": "The signer key fingerprint (git %GF) maps to a role via Config.Roles (fingerprint -> role). Identity is a credential, not a label: a container holding only one role's key cannot sign as another role. Untrusted commits (verdict != G) are rejected before role evaluation."
     },

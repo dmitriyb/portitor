@@ -70,7 +70,9 @@ The config carries a **`format_version`** stamp. This binary understands exactly
 fields present, `allowed_signers` readable, the roles map non-empty with **fingerprint-shaped
 keys** (`SHA256:` + 43 base64 chars — the shape git reports via `%GF`; anything else can never
 match a real signer, so it is dead weight that hides a typo'd revocation or grant) and non-empty
-role values, `action_roles` verbs from the closed set, and `content_rules` compiling cleanly.
+role values, `action_roles` verbs from the closed set, `content_rules` compiling cleanly, and
+`allowed_committer_emails` entries non-empty (an optional list; when present, the gate's
+committer-email rule compares against it byte-exact).
 
 ## Boundaries
 
