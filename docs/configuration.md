@@ -27,6 +27,14 @@ This document is the practical reference: the schema by example, `allowed_signer
   // untrusted and rejected.
   "allowed_signers": "/etc/portitor/allowed_signers",
 
+  // Optional. When non-empty, every introduced commit's committer email (git
+  // %ce) must be one of these values, compared byte-exact (no normalization);
+  // anything else is a "committer-email-not-allowed" violation. Empty/absent
+  // disables the check. NOTE: seed this field only after the gate binary/image
+  // is upgraded to a release that knows it — the strict decode makes an older
+  // binary refuse the whole config (and the container refuses to boot).
+  "allowed_committer_emails": ["you@example.com"],
+
   // Signer FINGERPRINT (git %GF, "SHA256:…") -> role. The role follows the key,
   // not a label in the commit — so it is unforgeable.
   "roles": {

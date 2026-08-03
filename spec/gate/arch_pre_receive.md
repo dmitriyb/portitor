@@ -81,7 +81,7 @@ Every commit an update *introduces* must carry a good signature from a signer li
 Each is verified with:
 
 ```
-git -C <repo> -c gpg.ssh.allowedSignersFile=<allowed_signers> show -s --format=%G?%n%GF%n%GS <sha>
+git -C <repo> -c gpg.ssh.allowedSignersFile=<allowed_signers> show -s --format=%G?%n%GF%n%GS%n%ce <sha>
 ```
 
 run hermetically (see *Deterministic verification environment*): replace-objects disabled,
@@ -90,10 +90,28 @@ empty configured path yields `%G? == U` for every commit, so a missing trust roo
 
 `%G?` must be `G` (good signature from a trusted/allowed signer); anything else — `N` (none),
 `B` (bad), `U` (good but signer not in `allowed_signers`), `E` (error) — is a violation. The same
-call yields `%GF` (the signer key fingerprint, used for role mapping below) and `%GS` (the matched
-principal). A *failure of the verification subprocess itself* (git exits non-zero, or the deadline
-expires) is distinguished from a signature verdict: it surfaces as an operational error that
-rejects the push, not as a synthetic "unsigned" violation.
+call yields `%GF` (the signer key fingerprint, used for role mapping below), `%GS` (the matched
+principal), and `%ce` (the committer email, consumed by the email rule below). A *failure of the
+verification subprocess itself* (git exits non-zero, or the deadline expires) is distinguished
+from a signature verdict: it surfaces as an operational error that rejects the push, not as a
+synthetic "unsigned" violation.
+
+### committer-email-not-allowed
+
+When `allowed_committer_emails` is non-empty, every commit an update introduces must carry a
+committer email (`%ce`) from that list; any other email is a violation naming the offending
+commit and email. The check runs for every new commit *independently* of the signature verdict —
+an unsigned commit with a bad email yields both violations, so the agent fixes everything in one
+correction pass. An empty or absent list disables the check entirely.
+
+Rationale: the signature check is key-based, so a commit whose committer email is a
+misconfigured placeholder signs fine and lands — and only later surfaces on the upstream forge,
+where signature verification is tied to a registered account email (an unresolvable address can
+never show as verified). The gate is the repo's policy chokepoint, so the email policy lives
+here. portitor stays mechanism: entries are opaque strings compared byte-exact; which addresses
+verify on which forge is the operator's business. The field is additive (no `format_version`
+bump): the strict decode already makes an older binary refuse a config carrying it — fail-closed
+on mixed versions.
 
 ## Atomicity & reporting
 

@@ -24,6 +24,12 @@ rules.
    pushed and its ref deleted on the bare side (objects remain, ref gone); a signed new branch →
    zero violations.
 
+6. **committer email allowlist** — with `allowed_committer_emails` set, a signed commit whose
+   committer email is listed → zero violations; an unlisted email → one violation, rule
+   `committer-email-not-allowed`, detail naming the email; an *unsigned* commit with an unlisted
+   email → both violations on the same commit (the email check is verdict-independent); an empty
+   list → the check never fires, unlisted emails land.
+
 ## Content rules (`role_test.go`, `content_test.go`)
 
 Two identities (implementer + reviewer keys, each in `allowed_signers`), `Roles` mapping each key
@@ -32,12 +38,12 @@ gating a record field's arrival at a protected value (roles `[reviewer, owner]`)
 **test-authored check command** (a trivial script — proving the seam takes any filler), plus
 structural rules gating delete/rename of a protected path:
 
-6. **implementer moves the gated field to the protected value** (signed by the implementer key)
+7. **implementer moves the gated field to the protected value** (signed by the implementer key)
    → violation named by the rule.
-7. **reviewer makes the same transition** → zero violations.
-8. **implementer changes an unrelated file / an unnamed field** → zero violations.
-9. **structural**: implementer deletes or renames a protected file → violation; reviewer → none.
-10. **check-command failure**: content the check command rejects (non-zero exit) → violation on
+8. **reviewer makes the same transition** → zero violations.
+9. **implementer changes an unrelated file / an unnamed field** → zero violations.
+10. **structural**: implementer deletes or renames a protected file → violation; reviewer → none.
+11. **check-command failure**: content the check command rejects (non-zero exit) → violation on
     either side of the delta; a command that cannot run at all → operational error. Both reject.
 
 These confirm role attribution is by signing **key** (the implementer can't masquerade as reviewer

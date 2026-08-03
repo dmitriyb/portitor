@@ -140,6 +140,16 @@ func TestValidate(t *testing.T) {
 	if p := Validate(badVersion); len(p) == 0 {
 		t.Fatal("an unsupported format_version should be invalid")
 	}
+	okEmails := good
+	okEmails.AllowedCommitterEmails = []string{"dev@example.com"}
+	if p := Validate(okEmails); len(p) != 0 {
+		t.Fatalf("non-empty allowed_committer_emails entries should validate: %v", p)
+	}
+	emptyEmail := good
+	emptyEmail.AllowedCommitterEmails = []string{"dev@example.com", ""}
+	if p := Validate(emptyEmail); len(p) == 0 {
+		t.Fatal("an empty allowed_committer_emails entry should be invalid (it can never match)")
+	}
 }
 
 // TestDecodeDiscipline pins the token-level strict decode: exact top-level
@@ -159,6 +169,12 @@ func TestDecodeDiscipline(t *testing.T) {
 	good := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"}}`
 	if _, err := LoadFile(write(t, good)); err != nil {
 		t.Fatalf("good config: %v", err)
+	}
+	withEmails := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"},"allowed_committer_emails":["dev@example.com"]}`
+	if s, err := LoadFile(write(t, withEmails)); err != nil {
+		t.Fatalf("allowed_committer_emails config: %v", err)
+	} else if len(s.AllowedCommitterEmails) != 1 || s.AllowedCommitterEmails[0] != "dev@example.com" {
+		t.Fatalf("allowed_committer_emails decoded as %v", s.AllowedCommitterEmails)
 	}
 
 	bad := map[string]string{

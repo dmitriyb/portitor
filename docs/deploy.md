@@ -21,6 +21,7 @@ deploy/run.sh --config-dir ./portitor-config \
 
 `deploy/run.sh` reads the GitHub PAT from your keychain and mounts the config dir read-only at `/etc/portitor` plus a persistent `/srv/git`.
 The entrypoint runs `validate-config` over every registry config at boot and refuses to start if any is invalid.
+Upgrade ordering follows from that: when a new release adds a config field (e.g. `allowed_committer_emails`), upgrade the binary/image **before** seeding the field — an older binary's strict decode refuses the whole config, taking the gate down at boot.
 
 ## 3. Provision a repo and bind roles
 

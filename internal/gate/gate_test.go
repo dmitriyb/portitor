@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -136,6 +137,113 @@ func TestCheck(t *testing.T) {
 			assertRules(t, vs, tc.wantRules)
 		})
 	}
+}
+
+// TestCheckCommitterEmailAllowlist covers spec/gate/test_pre_receive.md scenario 6
+// (proposal 2026-08-03-committer-email-allowlist): with allowed_committer_emails
+// set, a listed committer email passes, an unlisted one is a violation naming the
+// email, an unsigned commit with an unlisted email yields both violations, and an
+// empty list disables the check.
+func TestCheckCommitterEmailAllowlist(t *testing.T) {
+	requireBins(t, "git", "ssh-keygen")
+	e := newTestEnv(t)
+
+	base := e.commitFile("README.md", "base")
+	e.push("main")
+
+	e.checkout("-b", "feature")
+	featSigned := e.commitFile("a.txt", "a")
+	e.push("feature")
+
+	e.checkout("main")
+	e.checkout("-b", "feat-unsigned")
+	featUnsigned := e.commitFile("b.txt", "b", "--no-gpg-sign")
+	e.push("feat-unsigned")
+
+	tests := []struct {
+		name      string
+		allowed   []string
+		update    RefUpdate
+		wantRules []string
+	}{
+		{
+			name:      "listed committer email accepted",
+			allowed:   []string{"test@example.com"},
+			update:    RefUpdate{OldSHA: base, NewSHA: featSigned, Ref: "refs/heads/feature"},
+			wantRules: nil,
+		},
+		{
+			name:      "unlisted committer email rejected",
+			allowed:   []string{"other@example.com"},
+			update:    RefUpdate{OldSHA: base, NewSHA: featSigned, Ref: "refs/heads/feature"},
+			wantRules: []string{"committer-email-not-allowed"},
+		},
+		{
+			name:      "unsigned commit with unlisted email yields both violations",
+			allowed:   []string{"other@example.com"},
+			update:    RefUpdate{OldSHA: base, NewSHA: featUnsigned, Ref: "refs/heads/feat-unsigned"},
+			wantRules: []string{"committer-email-not-allowed", "unsigned-or-untrusted-commit"},
+		},
+		{
+			name:      "empty list disables the check",
+			allowed:   nil,
+			update:    RefUpdate{OldSHA: base, NewSHA: featSigned, Ref: "refs/heads/feature"},
+			wantRules: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{AllowedSigners: e.allowedSigners, AllowedCommitterEmails: tc.allowed}
+			vs, err := Check(e.bare, []RefUpdate{tc.update}, cfg)
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			// The email and signature rules are independent; their relative
+			// emission order is unspecified, so compare as a sorted set.
+			slices.SortFunc(vs, func(a, b Violation) int { return strings.Compare(a.Rule, b.Rule) })
+			assertRules(t, vs, tc.wantRules)
+			for _, v := range vs {
+				if v.Rule == "committer-email-not-allowed" && !strings.Contains(v.Detail, "test@example.com") {
+					t.Fatalf("detail does not name the offending email: %q", v.Detail)
+				}
+			}
+		})
+	}
+
+	// The comparison is byte-exact: a crafted ident "T < test@example.com >"
+	// yields %ce = " test@example.com ", which must NOT normalize to the listed
+	// address — the forge sees the raw padded ident, so accepting it would land
+	// a commit that still can never verify (the exact gap this rule closes).
+	t.Run("padded committer ident is not normalized", func(t *testing.T) {
+		tree := strings.TrimSpace(mustGitOut(t, e.work, "rev-parse", "HEAD^{tree}"))
+		body := "tree " + tree + "\nparent " + base +
+			"\nauthor T < test@example.com > 1700000000 +0000" +
+			"\ncommitter T < test@example.com > 1700000000 +0000" +
+			"\n\npadded ident\n"
+		hash := exec.Command("git", "-C", e.work, "hash-object", "--literally", "-t", "commit", "-w", "--stdin")
+		hash.Stdin = strings.NewReader(body)
+		out, err := hash.Output()
+		if err != nil {
+			t.Fatalf("hash-object: %v", err)
+		}
+		padded := strings.TrimSpace(string(out))
+		mustGit(t, e.work, "update-ref", "refs/heads/feat-padded", padded)
+		e.push("feat-padded")
+
+		cfg := Config{AllowedSigners: e.allowedSigners, AllowedCommitterEmails: []string{"test@example.com"}}
+		vs, err := Check(e.bare, []RefUpdate{{OldSHA: base, NewSHA: padded, Ref: "refs/heads/feat-padded"}}, cfg)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		slices.SortFunc(vs, func(a, b Violation) int { return strings.Compare(a.Rule, b.Rule) })
+		assertRules(t, vs, []string{"committer-email-not-allowed", "unsigned-or-untrusted-commit"})
+		for _, v := range vs {
+			if v.Rule == "committer-email-not-allowed" && !strings.Contains(v.Detail, `" test@example.com "`) {
+				t.Fatalf("detail should name the RAW padded email: %q", v.Detail)
+			}
+		}
+	})
 }
 
 // TestCheckCreateBranch exercises the branch-creation path (old = zero), where
