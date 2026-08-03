@@ -296,6 +296,13 @@ func newCommits(repoDir string, u RefUpdate) ([]string, error) {
 // is %GF (e.g. "SHA256:..."), signer is %GS (the matched principal), and email is
 // %ce (the committer email, consumed by the email-allowlist rule).
 //
+// The email is returned RAW — no trimming. The allowlist comparison is
+// byte-exact by spec: a crafted ident like "n < a@b >" yields %ce = " a@b ",
+// and normalizing it would accept a commit whose on-the-wire ident is not the
+// listed address (the forge sees the raw ident, so the commit would land yet
+// still be unverifiable — exactly the gap the rule closes). %ce is a single
+// line by construction, so the 4-line frame cannot be shifted.
+//
 // The verification runs hermetically with the allowed-signers trust root pinned
 // unconditionally: an empty allowedSigners path makes git report every signature
 // as untrusted (%G? == U), so a missing trust root fails closed — it never falls
@@ -312,7 +319,7 @@ func commitSig(repoDir, sha, allowedSigners string) (status, fingerprint, signer
 	for len(lines) < 4 {
 		lines = append(lines, "")
 	}
-	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2]), strings.TrimSpace(lines[3]), nil
+	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2]), lines[3], nil
 }
 
 // staleBase reports whether newSHA fails to contain the current default-branch tip

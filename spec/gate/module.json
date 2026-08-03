@@ -102,7 +102,7 @@
     },
     {
       "name": "Config",
-      "description": "internal/config: the per-repo trust-root file — canonical registry identity (ReposDir()/<name>.json), token-level strict decode (exact top-level keys, duplicate/case discipline, DisallowUnknownFields), the fail-closed format_version guard, and Validate (gate-integrity presence, fingerprint-shaped role keys, action_roles verbs, content_rules compilation).",
+      "description": "internal/config: the per-repo trust-root file — canonical registry identity (ReposDir()/<name>.json), token-level strict decode (exact top-level keys, duplicate/case discipline, DisallowUnknownFields), the fail-closed format_version guard, and Validate (gate-integrity presence, fingerprint-shaped role keys, action_roles verbs, content_rules compilation, allowed_committer_emails entries non-empty).",
       "content": "arch_config.md",
       "implements": []
     },
