@@ -41,11 +41,27 @@ type Settings struct {
 	// AuditLog, when set, receives one JSON line per gate/action decision.
 	// Empty disables the trail. Write failures never change a verdict.
 	AuditLog string `json:"audit_log"`
+	// MergeGate configures the merge review-precondition source and command
+	// predicates (spec/proposals/2026-08-04-merge-gate-v2.md). Absent block or
+	// absent review field both default to "internal" review source, no command
+	// predicates.
+	MergeGate *action.MergeGateConfig `json:"merge_gate"`
+	// ReviewsLog receives one appended, fsync'd JSON line per `review`
+	// verdict (action.ReviewRecord) — required when the effective
+	// merge_gate.review source is "internal" (see ReviewSource).
+	ReviewsLog string `json:"reviews_log"`
 	// IdentityOnlyRoles lists the roles whose keys must never gain
 	// commit-signing trust (landing-only identities). Classification is
 	// config, not code — portitor ships no role names. Absent = every role
 	// is a signing role.
 	IdentityOnlyRoles []string `json:"identity_only_roles"`
+}
+
+// ReviewSource returns the effective merge_gate.review source
+// (internal|github|none), defaulting to "internal" when merge_gate is absent
+// or its review field is empty (action.MergeGateConfig.ReviewSource).
+func (s Settings) ReviewSource() string {
+	return s.MergeGate.ReviewSource()
 }
 
 // IdentityOnly reports whether role is one of the config's identity-only
@@ -199,6 +215,8 @@ var topLevelKeys = map[string]bool{
 	"required_checks":                 true,
 	"audit_log":                       true,
 	"identity_only_roles":             true,
+	"merge_gate":                      true,
+	"reviews_log":                     true,
 }
 
 // dataMapKeys names the top-level keys whose object values are DATA maps
@@ -326,6 +344,29 @@ func Validate(s Settings) []string {
 		if !action.KnownVerb(verb) {
 			problems = append(problems, fmt.Sprintf("action_roles: unknown action %q (known: %v)", verb, action.Verbs))
 		}
+	}
+	if s.MergeGate != nil {
+		switch s.MergeGate.Review {
+		case "", "internal", "github", "none":
+		default:
+			problems = append(problems, fmt.Sprintf("merge_gate.review must be internal, github, or none, got %q", s.MergeGate.Review))
+		}
+		for i, c := range s.MergeGate.Checks {
+			if c.Name == "" {
+				problems = append(problems, fmt.Sprintf("merge_gate.checks[%d]: name is empty", i))
+			}
+			if len(c.Command) == 0 {
+				problems = append(problems, fmt.Sprintf("merge_gate.checks[%d] (%q): command is empty", i, c.Name))
+			}
+			for j, a := range c.Command {
+				if a == "" {
+					problems = append(problems, fmt.Sprintf("merge_gate.checks[%d] (%q): command[%d] is empty", i, c.Name, j))
+				}
+			}
+		}
+	}
+	if s.ReviewSource() == "internal" && s.ReviewsLog == "" {
+		problems = append(problems, "reviews_log is required when the effective merge_gate.review source is internal (the merge gate cannot consult a verdict that has nowhere to live)")
 	}
 	_, ruleProblems := rules.Compile(s.Content)
 	problems = append(problems, ruleProblems...)

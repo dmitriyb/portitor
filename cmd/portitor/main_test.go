@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,7 +29,9 @@ func TestValidateConfig(t *testing.T) {
 	}
 
 	fp := "SHA256:" + strings.Repeat("a", 43)
-	ok := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"}}`)
+	// merge_gate.review: none — the default ("internal") requires a reviews_log,
+	// which is irrelevant to what this test exercises.
+	ok := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"},"merge_gate":{"review":"none"}}`)
 	if rc := validateConfig([]string{"--config", ok}); rc != 0 {
 		t.Fatalf("valid config: rc = %d, want 0", rc)
 	}
@@ -78,6 +81,44 @@ func TestValidateConfig(t *testing.T) {
 	// Missing path → exit 2.
 	if rc := validateConfig([]string{"--config", filepath.Join(dir, "nope.json")}); rc != 1 {
 		t.Fatalf("missing config file: rc = %d, want 1", rc)
+	}
+}
+
+// TestReviewRejectsUnknownEvent pins that prRun's `review` verb refuses an
+// unrecognized --event (e.g. a misspelling like "aprove") before doing
+// anything else in that case: no reviews_log record, no GitHub post. A silent
+// fall-through would either record a bogus verdict or (worse) still post a
+// COMMENT-type review to GitHub under a verdict nobody asked for.
+func TestReviewRejectsUnknownEvent(t *testing.T) {
+	reposDir := t.TempDir()
+	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+	reviewsLog := filepath.Join(t.TempDir(), "reviews.jsonl")
+
+	fp := "SHA256:" + strings.Repeat("a", 43)
+	// upstream_slug is set explicitly so prRun reaches the "review" case
+	// without deriving a slug from a git remote (there is none in this test) —
+	// an empty/unresolvable slug would fail earlier, at the "no upstream slug
+	// configured" check, and never exercise the event validation this test
+	// targets. action_roles grants "reviewer" the review verb so the role
+	// check above the switch does not short-circuit first either.
+	cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+		`"roles":{"` + fp + `":"reviewer"},"action_roles":{"review":["reviewer"]},` +
+		`"upstream_slug":"acme/repo","reviews_log":"` + reviewsLog + `"}`
+	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errw bytes.Buffer
+	rc := prRun(fp, []string{"review"}, prOptions{PR: 1, Event: "aprove", Repo: "myrepo"},
+		strings.NewReader("looks good"), &out, &errw)
+	if rc == 0 {
+		t.Fatalf("misspelled --event should be refused, got rc=0 (stderr=%q)", errw.String())
+	}
+	if !strings.Contains(errw.String(), "review:") || !strings.Contains(errw.String(), `"aprove"`) {
+		t.Fatalf("expected a clear usage-style error naming the bad event, got %q", errw.String())
+	}
+	if _, err := os.Stat(reviewsLog); !os.IsNotExist(err) {
+		t.Fatalf("reviews_log must not be created/written for a rejected event, stat err = %v", err)
 	}
 }
 

@@ -182,7 +182,7 @@ func TestNoIdentityOnlyRolesMeansAllSigning(t *testing.T) {
 	if err := os.WriteFile(signers, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{}}`
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","merge_gate":{"review":"none"},"roles":{}}`
 	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

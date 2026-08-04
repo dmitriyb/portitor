@@ -10,16 +10,19 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/audit"
+	"github.com/dmitriyb/portitor/internal/check"
 	"github.com/dmitriyb/portitor/internal/config"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/git"
@@ -348,9 +351,21 @@ func autoOpenPR(dir, def, ref string, gh action.GH) (int, string, error) {
 // each is the per-repo config's action_roles map, default-deny. Every decision
 // is appended to the audit trail.
 
-func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader, out, errw io.Writer) int {
+// prOptions bundles the `pr` command's flags (beyond the action verb itself)
+// — one struct instead of a growing positional-parameter list as the verb set
+// grew reply/resolve's --thread/--inline/--gate-threads.
+type prOptions struct {
+	PR          int
+	Event       string
+	Repo        string
+	Thread      string
+	Inline      bool
+	GateThreads bool
+}
+
+func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(errw, "portitor pr: action required (comment|review|merge|close|fetch)")
+		fmt.Fprintln(errw, "portitor pr: action required (fetch|comment|review|reply|resolve|merge|close)")
 		return 2
 	}
 	act := args[0]
@@ -358,6 +373,7 @@ func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader
 		fmt.Fprintf(errw, "portitor pr: unknown action %q\n", act)
 		return 2
 	}
+	repo, prNum, event := o.Repo, o.PR, o.Event
 	if repo == "" {
 		fmt.Fprintln(errw, "portitor pr: --repo <name> required")
 		return 2
@@ -416,6 +432,15 @@ func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader
 			return fail(err)
 		}
 	case "review":
+		// Reject an unrecognized verdict before anything else in this case — no
+		// reviews_log record, no GitHub post, not even the separation-of-duties/
+		// FetchMergeState calls below. A misspelled --event (e.g. "aprove") must
+		// never silently fall through as if it were a no-op verdict.
+		switch event {
+		case "approve", "request-changes", "comment":
+		default:
+			return fail(fmt.Errorf("review: --event must be one of approve|request-changes|comment (got %q)", event))
+		}
 		if event == "approve" {
 			// Separation of duties: an approval must not come from a key that
 			// signed the PR's own commits.
@@ -427,15 +452,86 @@ func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader
 				return deny(fmt.Sprintf("separation of duties: key %s signed commits this PR introduces; it may not approve", fp))
 			}
 		}
-		if err := gh.Review(prNum, event, readBody(in)); err != nil {
+		st, err := gh.FetchMergeState(prNum)
+		if err != nil {
 			return fail(err)
+		}
+		var body string
+		var threadIDs []string
+		if o.Inline {
+			raw, rerr := io.ReadAll(in)
+			if rerr != nil {
+				return fail(fmt.Errorf("--inline: read stdin: %w", rerr))
+			}
+			var sub action.ReviewSubmission
+			if jerr := json.Unmarshal(raw, &sub); jerr != nil {
+				return fail(fmt.Errorf("--inline: stdin is not the {body,comments} JSON document: %w", jerr))
+			}
+			body = sub.Body
+			ids, rerr := gh.ReviewInline(prNum, sub.Body, sub.Comments)
+			if rerr != nil {
+				return fail(rerr)
+			}
+			threadIDs = ids
+		} else {
+			body = readBody(in)
+			if rerr := gh.Review(prNum, body); rerr != nil {
+				return fail(rerr)
+			}
+		}
+		if rerr := action.AppendReview(s.ReviewsLog, action.ReviewRecord{
+			PR: prNum, HeadSHA: st.HeadSHA, Fingerprint: fp, Role: role, Event: event, Threads: threadIDs,
+		}); rerr != nil {
+			return fail(fmt.Errorf("reviews_log: %w", rerr))
+		}
+		if event == "approve" {
+			if rerr := resolveGateThreads(gh, s.ReviewsLog, prNum); rerr != nil {
+				return fail(fmt.Errorf("auto-resolve: %w", rerr))
+			}
+		}
+	case "reply":
+		if o.Thread == "" {
+			return fail(errors.New("reply: --thread <id> required"))
+		}
+		if err := gh.Reply(o.Thread, readBody(in)); err != nil {
+			return fail(err)
+		}
+	case "resolve":
+		switch {
+		case o.Thread != "" && o.GateThreads:
+			return fail(errors.New("resolve: --thread and --gate-threads are mutually exclusive"))
+		case o.Thread != "":
+			if err := gh.Resolve(o.Thread); err != nil {
+				return fail(err)
+			}
+		case o.GateThreads:
+			if err := resolveGateThreads(gh, s.ReviewsLog, prNum); err != nil {
+				return fail(err)
+			}
+		default:
+			return fail(errors.New("resolve: --thread <id> or --gate-threads required"))
 		}
 	case "merge":
 		st, err := gh.FetchMergeState(prNum)
 		if err != nil {
 			return fail(err)
 		}
-		unmet := action.UnmetMergePreconditions(st, s.RequiredChecks)
+		reviewInput := action.ReviewGateInput{Source: s.ReviewSource()}
+		if reviewInput.Source == "" || reviewInput.Source == "internal" {
+			approved, aerr := action.InternalApproval(s.ReviewsLog, prNum, st.HeadSHA, s.ActionRoles)
+			if aerr != nil {
+				return fail(fmt.Errorf("internal review lookup: %w", aerr))
+			}
+			reviewInput.InternalApproved = approved
+		}
+		predicates, perr := runMergeChecks(s, repo, prNum, st.HeadSHA)
+		if perr != nil {
+			return fail(perr)
+		}
+		unmet, uerr := action.UnmetMergePreconditions(st, s.RequiredChecks, reviewInput, predicates)
+		if uerr != nil {
+			return fail(uerr)
+		}
 		signed, err := requesterSignedHead(s, repo, fp, st.HeadRefName)
 		if err != nil {
 			return fail(fmt.Errorf("separation-of-duties check: %w", err))
@@ -446,9 +542,12 @@ func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader
 		if len(unmet) > 0 {
 			return deny(fmt.Sprintf("PR #%d does not meet the merge preconditions: %s", prNum, strings.Join(unmet, "; ")))
 		}
-		// The final gh merge is the atomic gate: GitHub re-checks, so a state
-		// change since the query fails there (TOCTOU closed GitHub-side).
-		if err := gh.Merge(prNum); err != nil {
+		// The final gh merge is the atomic gate: --match-head-commit pins it to
+		// st.HeadSHA, the exact head the preconditions above were just evaluated
+		// against, so a state change (or a new commit) landing since the query
+		// fails there (TOCTOU closed GitHub-side) rather than silently merging a
+		// head the internal review verdict never covered.
+		if err := gh.Merge(prNum, st.HeadSHA); err != nil {
 			return fail(err)
 		}
 	case "close":
@@ -458,6 +557,67 @@ func prRun(fp string, args []string, prNum int, event, repo string, in io.Reader
 	}
 	auditDecision("allow", "")
 	return 0
+}
+
+// resolveGateThreads resolves every currently-unresolved review thread that
+// reviews_log records the gate's own reviews as having created on pr — used
+// by `review --event approve`'s auto-resolve and `resolve --gate-threads`.
+// Human-authored threads never appear in reviews_log, so they are never
+// touched here.
+func resolveGateThreads(gh action.GH, reviewsLog string, pr int) error {
+	ids, err := action.GateThreadIDs(reviewsLog, pr)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	threads, err := gh.FetchReviewThreads(pr)
+	if err != nil {
+		return err
+	}
+	unresolved := make(map[string]bool, len(threads))
+	for _, th := range threads {
+		if !th.IsResolved {
+			unresolved[th.ID] = true
+		}
+	}
+	for _, id := range ids {
+		if !unresolved[id] {
+			continue
+		}
+		if err := gh.Resolve(id); err != nil {
+			return fmt.Errorf("resolve thread %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// runMergeChecks runs each configured merge_gate.checks command as a merge
+// precondition, under check.RunPredicate's hermetic contract, in the repo's
+// bare dir, with the PR number and head SHA appended as the final two argv
+// elements.
+func runMergeChecks(s config.Settings, repo string, pr int, headSHA string) ([]action.PredicateResult, error) {
+	if s.MergeGate == nil || len(s.MergeGate.Checks) == 0 {
+		return nil, nil
+	}
+	bare := filepath.Join(config.ReposRoot(), repo+".git")
+	results := make([]action.PredicateResult, 0, len(s.MergeGate.Checks))
+	for _, c := range s.MergeGate.Checks {
+		res := action.PredicateResult{Name: c.Name}
+		err := check.RunPredicate(c.Command, bare, strconv.Itoa(pr), headSHA)
+		var ue *check.PredicateUnmetError
+		switch {
+		case err == nil:
+			res.Met = true
+		case errors.As(err, &ue):
+			res.Met = false
+		default:
+			res.Err = err
+		}
+		results = append(results, res)
+	}
+	return results, nil
 }
 
 // requesterSignedPR resolves the PR's head ref, then defers to

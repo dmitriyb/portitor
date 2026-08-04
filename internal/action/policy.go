@@ -3,7 +3,7 @@ package action
 // Verbs is the closed mechanism set of gated GitHub actions. WHO may perform
 // each verb is per-repo config (action_roles), never code — portitor ships no
 // role names.
-var Verbs = []string{"fetch", "comment", "review", "merge", "close"}
+var Verbs = []string{"fetch", "comment", "review", "reply", "resolve", "merge", "close"}
 
 // KnownVerb reports whether act is one of the closed mechanism verbs.
 func KnownVerb(act string) bool {

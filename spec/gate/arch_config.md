@@ -70,9 +70,12 @@ The config carries a **`format_version`** stamp. This binary understands exactly
 fields present, `allowed_signers` readable, the roles map non-empty with **fingerprint-shaped
 keys** (`SHA256:` + 43 base64 chars — the shape git reports via `%GF`; anything else can never
 match a real signer, so it is dead weight that hides a typo'd revocation or grant) and non-empty
-role values, `action_roles` verbs from the closed set, `content_rules` compiling cleanly, and
+role values, `action_roles` verbs from the closed set, `content_rules` compiling cleanly,
 `allowed_committer_emails` entries non-empty (an optional list; when present, the gate's
-committer-email rule compares against it byte-exact).
+committer-email rule compares against it byte-exact), `merge_gate.review` from
+`internal|github|none` with every `merge_gate.checks` entry carrying a name and a non-empty
+argv, and `reviews_log` (required when the effective review source is `internal` — the merge
+gate cannot consult a verdict that has nowhere to live).
 
 ## Boundaries
 

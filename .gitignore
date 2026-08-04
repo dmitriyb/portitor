@@ -6,3 +6,7 @@
 # Editor / OS
 *.swp
 .DS_Store
+
+# Local, gitignored real-GitHub e2e config (repo slug + keychain service name
+# — never a credential itself; the PAT is read from the macOS keychain).
+/cmd/portitor/testdata/realgh.local.json
