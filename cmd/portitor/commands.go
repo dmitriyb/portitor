@@ -274,20 +274,26 @@ func newShellCmd() *cobra.Command {
 // (see shellCommand's pr route). The grammar lives here alone.
 func newPrCmd(actorFingerprint func() string) *cobra.Command {
 	var prNum int
-	var event, repo string
+	var event, repo, thread string
+	var inline, gateThreads bool
 	cmd := &cobra.Command{
-		Use:     "pr <comment|review|merge|close|fetch>",
+		Use:     "pr <fetch|comment|review|reply|resolve|merge|close>",
 		Short:   "Run one role-validated GitHub action",
 		GroupID: cli.GroupAction,
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return exitErr(prRun(actorFingerprint(), args, prNum, event, repo,
-				cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
+			return exitErr(prRun(actorFingerprint(), args, prOptions{
+				PR: prNum, Event: event, Repo: repo, Thread: thread,
+				Inline: inline, GateThreads: gateThreads,
+			}, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
 	cmd.Flags().IntVar(&prNum, "pr", 0, "PR number")
-	cmd.Flags().StringVar(&event, "event", "", "review event: approve|request-changes|comment")
+	cmd.Flags().StringVar(&event, "event", "", "review verdict: approve|request-changes|comment (recorded internally; GitHub always sees a COMMENT-type review)")
 	cmd.Flags().StringVar(&repo, "repo", "", "repository name (selects the per-repo config)")
+	cmd.Flags().StringVar(&thread, "thread", "", "review thread id (reply, resolve)")
+	cmd.Flags().BoolVar(&inline, "inline", false, "review: read {body, comments:[{path,line,body}]} JSON from stdin and raise inline threads")
+	cmd.Flags().BoolVar(&gateThreads, "gate-threads", false, "resolve: resolve every unresolved thread the gate's own reviews created on this PR")
 	return cmd
 }
 

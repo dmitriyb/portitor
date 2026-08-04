@@ -50,9 +50,30 @@ This document is the practical reference: the schema by example, `allowed_signer
     "fetch":   ["implementer", "reviewer", "merger", "owner"],
     "comment": ["implementer", "reviewer", "merger", "owner"],
     "review":  ["reviewer", "owner"],
+    "reply":   ["implementer", "owner"],
+    "resolve": ["reviewer", "owner"],
     "merge":   ["merger", "owner"],
     "close":   ["merger", "owner"]
   },
+
+  // Merge review-precondition source + command predicates. Absent block (or
+  // absent review field) = "internal": a reviews_log approval for the PR's
+  // CURRENT head, by a role action_roles allows to review — the right model
+  // when the PAT account authors the PRs (GitHub then never sets
+  // reviewDecision and refuses self-approval). "github" = the legacy
+  // reviewDecision == APPROVED; "none" = no review precondition.
+  // checks: hermetic command predicates (argv verbatim + PR number + head SHA
+  // appended; run in the bare repo dir; exit 0 = met). mergeStateStatus ==
+  // CLEAN stays mandatory regardless.
+  "merge_gate": {
+    "review": "internal",
+    "checks": [ {"name": "bead-closed", "command": ["br", "--no-db", "…"]} ]
+  },
+
+  // REQUIRED when the effective merge_gate.review is "internal" (the
+  // default): one appended, fsync'd JSON line per review verdict — the record
+  // merge consults. Same file discipline as audit_log.
+  "reviews_log": "/srv/git/audit/myrepo-reviews.jsonl",
 
   // Roles whose keys are landing-only and must never gain commit-signing trust.
   // add-role refuses --pub for them and refuses rebinding an already-trusted key

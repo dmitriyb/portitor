@@ -21,10 +21,10 @@ Prefer `add-role` over hand-editing the `roles` map: it validates the fingerprin
 
 ## The `pr` action API
 
-`portitor pr <fetch|comment|review|merge|close> --repo <name> --pr <n>` runs one action with portitor's credential after checking the caller's role against `action_roles` (default-deny).
+`portitor pr <fetch|comment|review|reply|resolve|merge|close> --repo <name> --pr <n>` runs one action with portitor's credential after checking the caller's role against `action_roles` (default-deny). `review --inline` reads a JSON body raising inline threads; `reply --thread <id>` answers into a thread; `resolve --thread <id>` (or `--gate-threads` for every thread the gate's own reviews created) resolves them.
 Bodies are read from stdin so multi-line markdown survives transport.
 
-`merge` additionally **re-derives its preconditions from GitHub + the local repo** (never the request) and refuses with the full unmet list: approval (`reviewDecision == APPROVED`), a `CLEAN` merge state (covers behind-base / conflicts / blocked), every `required_checks` entry green, and separation of duties — the requesting key must not have signed any commit the PR introduces (the same check guards `review --event approve`).
+`merge` additionally **re-derives its preconditions from GitHub + the local repo + the gate's own review record** (never the request) and refuses with the full unmet list: the configured review source (`merge_gate.review`: `internal` — the default — wants a `reviews_log` approval for the CURRENT head by a role allowed to review; `github` wants `reviewDecision == APPROVED`; `none` skips), a `CLEAN` merge state (mandatory; covers behind-base / conflicts / blocked, and inherits every GitHub branch rule), every `required_checks` entry green, every `merge_gate.checks` command predicate passing (argv + PR number + head SHA, hermetic), and separation of duties — the requesting key must not have signed any commit the PR introduces (the same check guards `review --event approve`). The merge itself is head-pinned (`--match-head-commit`) to the evaluated head.
 The final `gh pr merge` is the atomic gate; enable GitHub branch protection as defense in depth.
 
 `owner` is your own (touch-required) override identity.

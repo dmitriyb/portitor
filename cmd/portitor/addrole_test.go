@@ -44,8 +44,11 @@ func seedRepo(t *testing.T, roles, extraSignerLines string) (reposDir, cfgPath, 
 	}
 	cfgPath = filepath.Join(reposDir, "myrepo.json")
 	// identity_only_roles is config, not code: the fixtures declare "merger"
-	// landing-only, matching the recommended deployment policy.
-	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath + `","identity_only_roles":["merger"],"roles":` + roles + `}`
+	// landing-only, matching the recommended deployment policy. merge_gate.review
+	// is set to "none" — the default ("internal") requires a reviews_log, which
+	// is irrelevant to what these add-role tests exercise.
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath +
+		`","identity_only_roles":["merger"],"merge_gate":{"review":"none"},"roles":` + roles + `}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +295,7 @@ func TestAddRole_CreatesMissingSigners(t *testing.T) {
 	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
 	signers := filepath.Join(reposDir, "sub", "allowed_signers") // parent missing too
 	cfg := filepath.Join(reposDir, "myrepo.json")
-	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{}}`
+	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","merge_gate":{"review":"none"},"roles":{}}`
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -377,6 +380,7 @@ func TestAddRole_PreservesOtherFields(t *testing.T) {
 	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `",` +
 		`"upstream_remote":"origin","upstream_slug":"acme/widgets",` +
 		`"content_rules":` + contentRules + `,` +
+		`"merge_gate":{"review":"none"},` +
 		`"roles":{"` + goodFP + `":"reviewer"}}`
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

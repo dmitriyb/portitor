@@ -15,7 +15,7 @@
     {
       "type": "functional",
       "title": "Role-gated pr action API (config-driven, default-deny)",
-      "description": "`portitor pr <comment|review|merge|close|fetch> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+      "description": "`portitor pr <fetch|comment|review|reply|resolve|merge|close> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|reply|resolve|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
     },
     {
       "type": "functional",
@@ -36,6 +36,21 @@
       "type": "non-functional",
       "title": "Routing is a pure, testable function",
       "description": "The security-critical dispatch (classify), role policy (action.RoleCan over the config's action_roles, default-deny), merge-precondition evaluation (a pure function over the fetched state), repo-path confinement (allowedRepoPath), command tokenizing (shellSplit), and slug derivation (deriveSlug) are pure functions, unit-tested without a network. The gh layer (internal/action) is tested with a stubbed runner."
+    },
+    {
+      "type": "functional",
+      "title": "Internal review verdict recorded per PR head",
+      "description": "`review` records {time, pr, head_sha, fingerprint, role, event, threads} as one appended fsync'd JSON line at the config's reviews_log path; toward GitHub it posts a COMMENT-type review (same-account safe; the PAT account cannot approve its own PRs). Lookup is last-wins per (pr, head_sha), so a new push invalidates any prior verdict by construction. --inline switches stdin to a JSON document {body, comments:[{path,line,body}]} that raises real inline threads; created thread ids are captured into the record. review --event approve auto-resolves the gate's own recorded unresolved threads and stays behind the separation-of-duties check."
+    },
+    {
+      "type": "functional",
+      "title": "Configurable merge preconditions (merge_gate)",
+      "description": "The review precondition is per-repo config: merge_gate.review = internal (default when absent; a reviews_log approval for the CURRENT head by a role action_roles allows to review) | github (legacy reviewDecision == APPROVED) | none. mergeStateStatus == CLEAN stays mandatory and non-configurable (portitor is a strict superset of GitHub's branch rules, never a bypass); required_checks and separation-of-duties are unchanged. merge_gate.checks are named command predicates under the content-rules hermetic execution contract (explicit argv, no shell, deadline, bounded output), run in the bare repo dir with the PR number and head SHA appended; exit 0 = met, nonzero = unmet (named), failure to run = operational error."
+    },
+    {
+      "type": "functional",
+      "title": "Review threads: fetch exposure, reply, resolve",
+      "description": "fetch includes reviewThreads (id, isResolved, path, line, comment chain) via one GraphQL query. New closed-set verbs: reply --pr N --thread <id> (body on stdin; addPullRequestReviewThreadReply) and resolve --pr N --thread <id> | --gate-threads (resolveReviewThread; --gate-threads resolves only threads the gate's own reviews created — human threads are never auto-resolved). Both verbs are action_roles-gated, default-deny."
     }
   ],
   "components": [

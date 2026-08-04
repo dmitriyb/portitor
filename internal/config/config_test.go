@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/rules"
 )
@@ -68,6 +69,23 @@ func TestIdentityOnly(t *testing.T) {
 	}
 }
 
+// TestReviewSource pins the default-to-internal resolution: absent block,
+// absent field, and an explicit value all resolve per
+// action.MergeGateConfig.ReviewSource.
+func TestReviewSource(t *testing.T) {
+	if got := (Settings{}).ReviewSource(); got != "internal" {
+		t.Fatalf("absent merge_gate: %q, want internal", got)
+	}
+	if got := (Settings{MergeGate: &action.MergeGateConfig{}}).ReviewSource(); got != "internal" {
+		t.Fatalf("absent review field: %q, want internal", got)
+	}
+	for _, src := range []string{"internal", "github", "none"} {
+		if got := (Settings{MergeGate: &action.MergeGateConfig{Review: src}}).ReviewSource(); got != src {
+			t.Fatalf("explicit %q: got %q", src, got)
+		}
+	}
+}
+
 // TestLoadRequiresConfigPath: the hook consumers must refuse to run without a
 // config — a gate with a zero config is not uniformly fail-closed.
 func TestLoadRequiresConfigPath(t *testing.T) {
@@ -103,7 +121,12 @@ func TestValidate(t *testing.T) {
 		DefaultBranch:  "main",
 		AllowedSigners: signers,
 		Roles:          map[string]string{fp: "reviewer"},
-	}}
+	},
+		// The default merge_gate.review source is "internal", which requires a
+		// reviews_log — set here so "good" stays a minimal valid config; the
+		// merge_gate/reviews_log-specific cases below vary this deliberately.
+		ReviewsLog: filepath.Join(dir, "reviews.jsonl"),
+	}
 	if p := Validate(good); len(p) != 0 {
 		t.Fatalf("valid config returned problems: %v", p)
 	}
@@ -150,6 +173,57 @@ func TestValidate(t *testing.T) {
 	if p := Validate(emptyEmail); len(p) == 0 {
 		t.Fatal("an empty allowed_committer_emails entry should be invalid (it can never match)")
 	}
+
+	// merge_gate / reviews_log: absent merge_gate defaults to "internal", which
+	// requires reviews_log (already asserted valid above, since "good" sets one).
+	noReviewsLog := good
+	noReviewsLog.ReviewsLog = "" // no MergeGate, no ReviewsLog: effective source is internal
+	if p := Validate(noReviewsLog); len(p) == 0 {
+		t.Fatal("effective internal review source with no reviews_log should be invalid")
+	}
+	githubSource := good
+	githubSource.ReviewsLog = ""
+	githubSource.MergeGate = &action.MergeGateConfig{Review: "github"}
+	if p := Validate(githubSource); len(p) != 0 {
+		t.Fatalf("github review source needs no reviews_log: %v", p)
+	}
+	noneSource := good
+	noneSource.ReviewsLog = ""
+	noneSource.MergeGate = &action.MergeGateConfig{Review: "none"}
+	if p := Validate(noneSource); len(p) != 0 {
+		t.Fatalf("none review source needs no reviews_log: %v", p)
+	}
+	badSource := good
+	badSource.MergeGate = &action.MergeGateConfig{Review: "bogus"}
+	if p := Validate(badSource); len(p) == 0 {
+		t.Fatal("an unknown merge_gate.review value should be invalid")
+	}
+	explicitInternalNoLog := good
+	explicitInternalNoLog.ReviewsLog = ""
+	explicitInternalNoLog.MergeGate = &action.MergeGateConfig{Review: "internal"}
+	if p := Validate(explicitInternalNoLog); len(p) == 0 {
+		t.Fatal("explicit internal review source with no reviews_log should be invalid")
+	}
+	goodChecks := good
+	goodChecks.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "bead-closed", Command: []string{"br", "--no-db"}}}}
+	if p := Validate(goodChecks); len(p) != 0 {
+		t.Fatalf("a well-formed check predicate should validate: %v", p)
+	}
+	noNameCheck := good
+	noNameCheck.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Command: []string{"br"}}}}
+	if p := Validate(noNameCheck); len(p) == 0 {
+		t.Fatal("a check predicate with an empty name should be invalid")
+	}
+	noCommandCheck := good
+	noCommandCheck.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "x"}}}
+	if p := Validate(noCommandCheck); len(p) == 0 {
+		t.Fatal("a check predicate with an empty command should be invalid")
+	}
+	emptyArgvCheck := good
+	emptyArgvCheck.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "x", Command: []string{"br", ""}}}}
+	if p := Validate(emptyArgvCheck); len(p) == 0 {
+		t.Fatal("a check predicate with an empty argv element should be invalid")
+	}
 }
 
 // TestDecodeDiscipline pins the token-level strict decode: exact top-level
@@ -177,6 +251,26 @@ func TestDecodeDiscipline(t *testing.T) {
 		t.Fatalf("allowed_committer_emails decoded as %v", s.AllowedCommitterEmails)
 	}
 
+	withMergeGate := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"},` +
+		`"reviews_log":"/var/lib/portitor/reviews.jsonl","merge_gate":{"review":"internal","checks":[{"name":"bead-closed","command":["br","--no-db"]}]}}`
+	if s, err := LoadFile(write(t, withMergeGate)); err != nil {
+		t.Fatalf("merge_gate config: %v", err)
+	} else if s.ReviewsLog != "/var/lib/portitor/reviews.jsonl" || s.MergeGate == nil ||
+		s.MergeGate.Review != "internal" || len(s.MergeGate.Checks) != 1 ||
+		s.MergeGate.Checks[0].Name != "bead-closed" || len(s.MergeGate.Checks[0].Command) != 2 {
+		t.Fatalf("merge_gate/reviews_log decoded as %+v", s)
+	}
+
+	// merge_gate absent entirely, and merge_gate present with an absent
+	// review field, must both decode fine (default resolved by ReviewSource,
+	// not the decoder).
+	minimalMergeGate := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"},"merge_gate":{}}`
+	if s, err := LoadFile(write(t, minimalMergeGate)); err != nil {
+		t.Fatalf("empty merge_gate block: %v", err)
+	} else if s.MergeGate == nil || s.MergeGate.Review != "" {
+		t.Fatalf("empty merge_gate block decoded as %+v", s.MergeGate)
+	}
+
 	bad := map[string]string{
 		"missing format_version": `{"default_branch":"main","allowed_signers":"x","roles":{}}`,
 		"higher format_version":  `{"format_version":2,"default_branch":"main","allowed_signers":"x","roles":{}}`,
@@ -191,8 +285,13 @@ func TestDecodeDiscipline(t *testing.T) {
 		"duplicate data-map key":  `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"a","` + fp + `":"b"}}`,
 		// Nested schema objects must be lowercase too.
 		"cased nested key": `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"content_rules":{"Version":1}}`,
-		"non-object top":   `[1,2,3]`,
-		"trailing content": `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{}}{"roles":{"` + fp + `":"owner"}}`,
+		// merge_gate is a schema object (not a data map): cased/duplicate keys,
+		// including inside its checks[] entries, must be rejected the same way.
+		"cased merge_gate key":       `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"merge_gate":{"Review":"internal"}}`,
+		"duplicate merge_gate key":   `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"merge_gate":{"review":"none","review":"github"}}`,
+		"cased merge_gate check key": `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"merge_gate":{"checks":[{"Name":"x","command":["a"]}]}}`,
+		"non-object top":             `[1,2,3]`,
+		"trailing content":           `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{}}{"roles":{"` + fp + `":"owner"}}`,
 	}
 	for name, body := range bad {
 		t.Run(name, func(t *testing.T) {
