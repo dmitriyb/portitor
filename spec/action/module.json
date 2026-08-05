@@ -20,7 +20,7 @@
     {
       "type": "functional",
       "title": "Merge preconditions are re-derived from authoritative state",
-      "description": "Before merging, portitor re-derives every precondition in one gh query plus the local repo, refusing with the full unmet list: reviewDecision == APPROVED; mergeStateStatus == CLEAN (mandatory — covers behind-base, conflicts, and blocked); every configured required_check present and successful in statusCheckRollup (an empty required_checks list is advisory); and separation of duties — the requesting key must not have signed any commit the PR introduces (verified against the local gated repo via rev-list default..head + %GF, fail-closed if the head ref is absent locally; the same check guards review --event approve). Enforcement is hybrid: the final gh pr merge is the atomic gate (GitHub re-checks, closing the TOCTOU window). The landing credential is optional — with no role granted merge in action_roles, merge is unavailable via portitor."
+      "description": "Before merging, portitor re-derives every precondition in one gh query plus the local repo, refusing with the full unmet list: the configured review source (merge_gate.review: github → reviewDecision == APPROVED; or none); mergeStateStatus == CLEAN (mandatory — covers behind-base, conflicts, and blocked); every configured required_check present and successful in statusCheckRollup (an empty required_checks list is advisory); and every merge_gate.checks git-content predicate. Separation of duties is removed — it is no longer a portitor precondition (reviewer-≠-author integrity lives in GitHub branch protection or the push-time reviewer-only content_rules). Enforcement is hybrid: the final gh pr merge --match-head-commit is the atomic gate (GitHub re-checks, closing the TOCTOU window). The landing credential is optional — with no role granted merge in action_roles, merge is unavailable via portitor."
     },
     {
       "type": "functional",
@@ -39,13 +39,13 @@
     },
     {
       "type": "functional",
-      "title": "Internal review verdict recorded per PR head",
-      "description": "`review` records {time, pr, head_sha, fingerprint, role, event, threads} as one appended fsync'd JSON line at the config's reviews_log path; toward GitHub it posts a COMMENT-type review (same-account safe; the PAT account cannot approve its own PRs). Lookup is last-wins per (pr, head_sha), so a new push invalidates any prior verdict by construction. --inline switches stdin to a JSON document {body, comments:[{path,line,body}]} that raises real inline threads; created thread ids are captured into the record. review --event approve auto-resolves the gate's own recorded unresolved threads and stays behind the separation-of-duties check."
+      "title": "review is a transparent GitHub passthrough (no gate-owned verdict)",
+      "description": "`review` is a transparent GitHub passthrough: review --event <approve|request-changes|comment> submits the caller's real GitHub review event and holds no gate state (no reviews_log). --inline switches stdin to a JSON document {body, comments:[{path,line,body}]} carried on that native review to raise real inline threads. A forge refusal (e.g. HTTP 422 when the PAT account approves its own PR) fails loudly and forwards the error verbatim. review --event approve auto-resolves the gate's own unresolved threads, identified by author (the gate's PAT account). The approval verdict lives in a source of truth — native GitHub (merge_gate.review: github) or a git-content merge_gate.checks predicate — never in portitor."
     },
     {
       "type": "functional",
       "title": "Configurable merge preconditions (merge_gate)",
-      "description": "The review precondition is per-repo config: merge_gate.review = internal (default when absent; a reviews_log approval for the CURRENT head by a role action_roles allows to review) | github (legacy reviewDecision == APPROVED) | none. mergeStateStatus == CLEAN stays mandatory and non-configurable (portitor is a strict superset of GitHub's branch rules, never a bypass); required_checks and separation-of-duties are unchanged. merge_gate.checks are named command predicates under the content-rules hermetic execution contract (explicit argv, no shell, deadline, bounded output), run in the bare repo dir with the PR number and head SHA appended; exit 0 = met, nonzero = unmet (named), failure to run = operational error."
+      "description": "The review precondition is per-repo config: merge_gate.review = github (native reviewDecision == APPROVED — separated accounts; GitHub enforces required approvals, no self-approval, stale-dismissal) | none (default when absent; no review precondition here — express it as a merge_gate.checks git-content predicate). The retired internal source and its reviews_log key are gone (strict-decode rejects a config carrying them). mergeStateStatus == CLEAN stays mandatory and non-configurable (portitor is a strict superset of GitHub's branch rules, never a bypass); required_checks unchanged; separation-of-duties is removed (no longer a portitor precondition). merge_gate.checks are named command predicates under the content-rules hermetic execution contract (explicit argv, no shell, deadline, bounded output), run in the bare repo dir with the PR number and head SHA appended; exit 0 = met, nonzero = unmet (named), failure to run = operational error."
     },
     {
       "type": "functional",
@@ -68,7 +68,7 @@
     },
     {
       "name": "PrCommand",
-      "description": "`portitor pr` handler: parses the action + --pr/--event, checks action.RoleCan against the config's action_roles (default-deny), reads the body from stdin, and dispatches to ActionClient; merge re-derives the full precondition set (approval, CLEAN merge state, required checks, separation of duties) and review-approve re-derives separation of duties; every decision is appended to the audit trail.",
+      "description": "`portitor pr` handler: parses the action + --pr/--event, checks action.RoleCan against the config's action_roles (default-deny), reads the body from stdin, and dispatches to ActionClient; merge re-derives the full precondition set (the configured review source, CLEAN merge state, required checks, and merge_gate.checks git-content predicates); review submits the caller's real GitHub event (no separation-of-duties check — that hardcoded rule is removed); every decision is appended to the audit trail.",
       "content": "arch_action.md",
       "implements": []
     },

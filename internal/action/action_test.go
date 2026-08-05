@@ -3,6 +3,7 @@ package action
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -45,34 +46,100 @@ func TestOpenPRNumberIdempotency(t *testing.T) {
 	}
 }
 
-// TestReviewAlwaysComment pins the v2 same-account-safe behavior: GH.Review
-// posts a COMMENT-type review toward GitHub regardless of the caller's
-// verdict — the verdict (approve/request-changes/comment) lives only in the
-// gate's own reviews_log, never as a GitHub approve/request-changes call
-// (which the PAT's own account cannot use to self-approve).
-func TestReviewAlwaysComment(t *testing.T) {
-	run, last := stub("", nil)
-	if err := (GH{Repo: "o/r", Run: run}).Review(3, "lgtm"); err != nil {
-		t.Fatal(err)
+// TestReviewSubmitsRealEvent pins the transparent-passthrough behavior
+// (2026-08-05-transparent-approve): GH.Review submits the caller's REAL
+// GitHub review event — approve/request-changes/comment — never a forced
+// COMMENT.
+func TestReviewSubmitsRealEvent(t *testing.T) {
+	cases := []struct {
+		verdict  string
+		wantFlag string
+	}{
+		{"approve", "--approve"},
+		{"request-changes", "--request-changes"},
+		{"comment", "--comment"},
 	}
-	got := strings.Join(*last, " ")
-	if !strings.Contains(got, "pr review 3") || !strings.Contains(got, "--comment") || !strings.Contains(got, "--body lgtm") {
-		t.Fatalf("args = %q", got)
-	}
-	if strings.Contains(got, "--approve") || strings.Contains(got, "--request-changes") {
-		t.Fatalf("Review must never post approve/request-changes to GitHub: %q", got)
+	for _, c := range cases {
+		t.Run(c.verdict, func(t *testing.T) {
+			run, last := stub("", nil)
+			if err := (GH{Repo: "o/r", Run: run}).Review(3, c.verdict, "lgtm"); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(*last, " ")
+			if !strings.Contains(got, "pr review 3") || !strings.Contains(got, c.wantFlag) || !strings.Contains(got, "--body lgtm") {
+				t.Fatalf("args = %q, want %q", got, c.wantFlag)
+			}
+			for _, other := range []string{"--approve", "--request-changes", "--comment"} {
+				if other != c.wantFlag && strings.Contains(got, other) {
+					t.Fatalf("args %q must carry only %q, not %q", got, c.wantFlag, other)
+				}
+			}
+		})
 	}
 }
 
+// TestReviewUnknownVerdict pins that an unrecognized verdict is rejected
+// before any gh call is attempted.
+func TestReviewUnknownVerdict(t *testing.T) {
+	run, last := stub("", nil)
+	if err := (GH{Repo: "o/r", Run: run}).Review(3, "aprove", "lgtm"); err == nil {
+		t.Fatal("unknown verdict must error")
+	}
+	if *last != nil {
+		t.Fatalf("gh must not be called for an unknown verdict, got args %v", *last)
+	}
+}
+
+// TestReviewForgeRefusalPropagates pins that a forge refusal (e.g. HTTP 422
+// on self-approval) is returned verbatim, not swallowed — review is a
+// transparent passthrough that fails loudly.
+func TestReviewForgeRefusalPropagates(t *testing.T) {
+	wantErr := fmt.Errorf("gh pr review: HTTP 422: Unprocessable Entity: Can not approve your own pull request")
+	run, _ := stub("", wantErr)
+	err := (GH{Repo: "o/r", Run: run}).Review(3, "approve", "lgtm")
+	if err == nil || !strings.Contains(err.Error(), "422") {
+		t.Fatalf("want the 422 error propagated verbatim, got %v", err)
+	}
+}
+
+// readInputPayloadEvent extracts the "event" field from a create-review
+// call's --input payload file. It must be called from WITHIN the fake
+// Runner, at call time: ReviewInline removes the temp payload file (defer
+// os.Remove) before returning, so reading it back afterward always fails.
+func readInputPayloadEvent(args []string) (string, error) {
+	for i, a := range args {
+		if a == "--input" && i+1 < len(args) {
+			b, err := os.ReadFile(args[i+1])
+			if err != nil {
+				return "", err
+			}
+			var payload struct {
+				Event string `json:"event"`
+			}
+			if err := json.Unmarshal(b, &payload); err != nil {
+				return "", err
+			}
+			return payload.Event, nil
+		}
+	}
+	return "", fmt.Errorf("no --input flag in args %v", args)
+}
+
 // TestReviewInline pins the --inline submission shape: one REST create-review
-// call carrying comments[], then a review-comments lookup and a
-// reviewThreads GraphQL query to correlate the created threads.
+// call carrying the caller's real event + comments[], then a review-comments
+// lookup and a reviewThreads GraphQL query to correlate the created threads.
 func TestReviewInline(t *testing.T) {
 	var calls [][]string
+	var gotEvent string
 	run := func(args ...string) (string, error) {
 		calls = append(calls, args)
 		switch {
 		case len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/reviews") && !strings.Contains(args[1], "/comments"):
+			ev, everr := readInputPayloadEvent(args)
+			if everr != nil {
+				t.Fatalf("read --input payload: %v", everr)
+			}
+			gotEvent = ev
 			return `{"id":99,"node_id":"REV_1"}`, nil
 		case len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/reviews/99/comments"):
 			return `[{"node_id":"PRRC_1"},{"node_id":"PRRC_2"}]`, nil
@@ -87,30 +154,68 @@ func TestReviewInline(t *testing.T) {
 		}
 	}
 	g := GH{Repo: "o/r", Run: run}
-	ids, err := g.ReviewInline(7, "please fix", []InlineComment{{Path: "a.go", Line: 3, Body: "x"}})
+	ids, err := g.ReviewInline(7, "request-changes", "please fix", []InlineComment{{Path: "a.go", Line: 3, Body: "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ids) != 1 || ids[0] != "PRT_1" {
 		t.Fatalf("thread ids = %v, want [PRT_1] (PRT_2 belongs to a different, human comment)", ids)
 	}
-	// First call must be the REST create-review with --input (a payload file).
+	// First call must be the REST create-review with --input (a payload file)
+	// carrying the caller's real event, not a forced COMMENT.
 	if calls[0][0] != "api" || !strings.Contains(strings.Join(calls[0], " "), "--input") {
 		t.Fatalf("first call = %v, want a REST create-review with --input", calls[0])
 	}
 	if !strings.HasSuffix(calls[0][1], "/pulls/7/reviews") {
 		t.Fatalf("endpoint = %q", calls[0][1])
 	}
+	if gotEvent != "REQUEST_CHANGES" {
+		t.Fatalf("payload event = %q, want REQUEST_CHANGES", gotEvent)
+	}
 }
 
 func TestReviewInlineNoComments(t *testing.T) {
-	run, _ := stub(`{"id":1,"node_id":"REV_1"}`, nil)
-	ids, err := (GH{Repo: "o/r", Run: run}).ReviewInline(7, "just a comment", nil)
+	var gotEvent string
+	run := func(args ...string) (string, error) {
+		ev, err := readInputPayloadEvent(args)
+		if err != nil {
+			t.Fatalf("read --input payload: %v", err)
+		}
+		gotEvent = ev
+		return `{"id":1,"node_id":"REV_1"}`, nil
+	}
+	ids, err := (GH{Repo: "o/r", Run: run}).ReviewInline(7, "approve", "just a comment", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ids) != 0 {
 		t.Fatalf("no comments should raise no threads, got %v", ids)
+	}
+	if gotEvent != "APPROVE" {
+		t.Fatalf("payload event = %q, want APPROVE", gotEvent)
+	}
+}
+
+// TestReviewInlineUnknownVerdict pins that an unrecognized verdict is
+// rejected before any gh call is attempted.
+func TestReviewInlineUnknownVerdict(t *testing.T) {
+	run, last := stub("", nil)
+	if _, err := (GH{Repo: "o/r", Run: run}).ReviewInline(7, "aprove", "x", nil); err == nil {
+		t.Fatal("unknown verdict must error")
+	}
+	if *last != nil {
+		t.Fatalf("gh must not be called for an unknown verdict, got args %v", *last)
+	}
+}
+
+// TestReviewInlineForgeRefusalPropagates pins that a forge refusal from the
+// REST create-review call is returned verbatim.
+func TestReviewInlineForgeRefusalPropagates(t *testing.T) {
+	wantErr := fmt.Errorf("gh api: HTTP 422: Unprocessable Entity: Can not approve your own pull request")
+	run, _ := stub("", wantErr)
+	_, err := (GH{Repo: "o/r", Run: run}).ReviewInline(7, "approve", "x", nil)
+	if err == nil || !strings.Contains(err.Error(), "422") {
+		t.Fatalf("want the 422 error propagated verbatim, got %v", err)
 	}
 }
 
@@ -143,6 +248,59 @@ func TestResolve(t *testing.T) {
 	}
 	if err := (GH{Repo: "o/r", Run: run}).Resolve(""); err == nil {
 		t.Fatal("empty thread id must error")
+	}
+}
+
+// TestCurrentLogin pins the `gh api user --jq .login` call shape used to
+// identify the gate's own account, now that reviews_log is retired.
+func TestCurrentLogin(t *testing.T) {
+	run, last := stub("portitor-bot\n", nil)
+	login, err := (GH{Repo: "o/r", Run: run}).CurrentLogin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login != "portitor-bot" {
+		t.Fatalf("login = %q, want portitor-bot", login)
+	}
+	got := strings.Join(*last, " ")
+	for _, want := range []string{"api", "user", "--jq", ".login"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "-R o/r") {
+		t.Fatalf("gh api user has no -R flag; args must not carry one: %q", got)
+	}
+
+	empty, _ := stub("\n", nil)
+	if _, err := (GH{Repo: "o/r", Run: empty}).CurrentLogin(); err == nil {
+		t.Fatal("an empty login must be an error")
+	}
+	fails, _ := stub("", fmt.Errorf("boom"))
+	if _, err := (GH{Repo: "o/r", Run: fails}).CurrentLogin(); err == nil {
+		t.Fatal("a runner failure must propagate")
+	}
+}
+
+// TestGateAuthoredThreads pins the author-derived gate-thread identity that
+// replaces reviews_log's GateThreadIDs: only threads whose opening comment
+// was authored by the gate's own login are returned — a human-authored
+// thread must never be included, regardless of resolved state (filtering by
+// resolved-state is the caller's job, see resolveGateThreads in cmd/portitor).
+func TestGateAuthoredThreads(t *testing.T) {
+	threads := []ReviewThread{
+		{ID: "PRT_1", IsResolved: false, Comments: []ThreadComment{{ID: "C1", Author: "portitor-bot"}}},
+		{ID: "PRT_2", IsResolved: true, Comments: []ThreadComment{{ID: "C2", Author: "portitor-bot"}}},
+		{ID: "PRT_3", IsResolved: false, Comments: []ThreadComment{{ID: "C3", Author: "human-reviewer"}}},
+		{ID: "PRT_4", IsResolved: false, Comments: nil}, // no comments: must never match
+	}
+	got := GateAuthoredThreads(threads, "portitor-bot")
+	var ids []string
+	for _, th := range got {
+		ids = append(ids, th.ID)
+	}
+	if strings.Join(ids, ",") != "PRT_1,PRT_2" {
+		t.Fatalf("gate-authored threads = %v, want [PRT_1 PRT_2] (PRT_3 is human-authored, PRT_4 has no comments)", ids)
 	}
 }
 
@@ -216,7 +374,8 @@ func TestFetchMergesReviewThreads(t *testing.T) {
 // TestMergeIsHeadPinned pins the TOCTOU fix: Merge must append
 // --match-head-commit <headSHA> so GitHub's own atomic re-check refuses if the
 // head moved since the caller evaluated the merge preconditions — the
-// internal review verdict (reviews_log) was recorded against that exact head.
+// git-content merge_gate.checks predicates were evaluated against that exact
+// head.
 func TestMergeIsHeadPinned(t *testing.T) {
 	run, last := stub("", nil)
 	if err := (GH{Repo: "o/r", Run: run}).Merge(9, "deadbeefcafe"); err != nil {
@@ -254,18 +413,17 @@ func TestFetchMergeState(t *testing.T) {
 	}
 }
 
-// internalOK/githubOK/noneOK are the minimal ReviewGateInput that satisfies
-// each source, for building precondition-matrix test cases.
+// githubOK/noneOK are the minimal ReviewGateInput that satisfies each source,
+// for building precondition-matrix test cases.
 var (
-	internalOK = ReviewGateInput{Source: "internal", InternalApproved: true}
-	githubOK   = ReviewGateInput{Source: "github"}
-	noneOK     = ReviewGateInput{Source: "none"}
+	githubOK = ReviewGateInput{Source: "github"}
+	noneOK   = ReviewGateInput{Source: "none"}
 )
 
 // TestUnmetMergePreconditionsMatrix is the merge precondition table: review
-// source (internal approved/absent/stale-head via the caller-resolved
-// ReviewGateInput, github, none), CLEAN gate, required checks, and command
-// predicates (met/unmet/broken).
+// source (github, none, default empty-string), CLEAN gate, required checks,
+// and command predicates (met/unmet/broken). The retired "internal" source
+// is gone (see 2026-08-05-transparent-approve).
 func TestUnmetMergePreconditionsMatrix(t *testing.T) {
 	clean := MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN",
 		StatusCheckRollup: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
@@ -279,19 +437,16 @@ func TestUnmetMergePreconditionsMatrix(t *testing.T) {
 		wantUnmet      bool
 		wantErr        bool
 	}{
-		{name: "internal approved + clean + checks green", st: clean, requiredChecks: []string{"ci/test"}, review: internalOK},
-		{name: "internal not approved", st: clean, review: ReviewGateInput{Source: "internal", InternalApproved: false}, wantUnmet: true},
-		{name: "internal default source (empty string)", st: clean, review: ReviewGateInput{Source: "", InternalApproved: false}, wantUnmet: true},
-		{name: "internal default source approved", st: clean, review: ReviewGateInput{Source: "", InternalApproved: true}},
-		{name: "github approved", st: clean, review: githubOK},
+		{name: "github approved + clean + checks green", st: clean, requiredChecks: []string{"ci/test"}, review: githubOK},
 		{name: "github reviewDecision empty (stale/no review)", st: func() MergeState { s := clean; s.ReviewDecision = ""; return s }(), review: ReviewGateInput{Source: "github"}, wantUnmet: true},
 		{name: "none skips review entirely, even with no approval evidence", st: clean, review: noneOK},
+		{name: "default source (empty string) behaves like none", st: clean, review: ReviewGateInput{Source: ""}},
 		{name: "unknown review source", st: clean, review: ReviewGateInput{Source: "bogus"}, wantUnmet: true},
-		{name: "advisory empty required_checks", st: MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN"}, review: internalOK},
-		{name: "missing required check", st: clean, requiredChecks: []string{"ci/other"}, review: internalOK, wantUnmet: true},
-		{name: "predicate met", st: clean, review: internalOK, predicates: []PredicateResult{{Name: "p", Met: true}}},
-		{name: "predicate unmet", st: clean, review: internalOK, predicates: []PredicateResult{{Name: "p", Met: false}}, wantUnmet: true},
-		{name: "predicate broken (operational)", st: clean, review: internalOK, predicates: []PredicateResult{{Name: "p", Err: fmt.Errorf("boom")}}, wantErr: true},
+		{name: "advisory empty required_checks", st: MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN"}, review: noneOK},
+		{name: "missing required check", st: clean, requiredChecks: []string{"ci/other"}, review: noneOK, wantUnmet: true},
+		{name: "predicate met", st: clean, review: noneOK, predicates: []PredicateResult{{Name: "p", Met: true}}},
+		{name: "predicate unmet", st: clean, review: noneOK, predicates: []PredicateResult{{Name: "p", Met: false}}, wantUnmet: true},
+		{name: "predicate broken (operational)", st: clean, review: noneOK, predicates: []PredicateResult{{Name: "p", Err: fmt.Errorf("boom")}}, wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -323,7 +478,7 @@ func TestUnmetMergePreconditionsCleanAndChecks(t *testing.T) {
 	for _, state := range []string{"", "BEHIND", "DIRTY", "BLOCKED", "UNSTABLE", "UNKNOWN"} {
 		st := clean
 		st.MergeStateStatus = state
-		unmet, err := UnmetMergePreconditions(st, nil, internalOK, nil)
+		unmet, err := UnmetMergePreconditions(st, nil, noneOK, nil)
 		if err != nil {
 			t.Fatalf("merge state %q: unexpected error %v", state, err)
 		}
@@ -333,13 +488,13 @@ func TestUnmetMergePreconditionsCleanAndChecks(t *testing.T) {
 	}
 	failed := clean
 	failed.StatusCheckRollup = []CheckRun{{Name: "ci/test", Conclusion: "FAILURE"}}
-	if unmet, err := UnmetMergePreconditions(failed, []string{"ci/test"}, internalOK, nil); err != nil || len(unmet) == 0 {
+	if unmet, err := UnmetMergePreconditions(failed, []string{"ci/test"}, noneOK, nil); err != nil || len(unmet) == 0 {
 		t.Fatalf("failed required check must be unmet, got unmet=%v err=%v", unmet, err)
 	}
 	// Legacy status contexts (context/state shape) also count.
 	legacy := clean
 	legacy.StatusCheckRollup = []CheckRun{{Context: "ci/legacy", State: "SUCCESS"}}
-	if unmet, err := UnmetMergePreconditions(legacy, []string{"ci/legacy"}, internalOK, nil); err != nil || len(unmet) != 0 {
+	if unmet, err := UnmetMergePreconditions(legacy, []string{"ci/legacy"}, noneOK, nil); err != nil || len(unmet) != 0 {
 		t.Fatalf("legacy status context should satisfy: unmet=%v err=%v", unmet, err)
 	}
 	// Deny-wins across duplicate same-name entries: one green + one red = unmet.
@@ -348,7 +503,7 @@ func TestUnmetMergePreconditionsCleanAndChecks(t *testing.T) {
 		{Name: "ci/test", Conclusion: "SUCCESS"},
 		{Name: "ci/test", Conclusion: "FAILURE"},
 	}
-	if unmet, err := UnmetMergePreconditions(dup, []string{"ci/test"}, internalOK, nil); err != nil || len(unmet) == 0 {
+	if unmet, err := UnmetMergePreconditions(dup, []string{"ci/test"}, noneOK, nil); err != nil || len(unmet) == 0 {
 		t.Fatalf("a duplicate failing entry for a required check must be unmet, got unmet=%v err=%v", unmet, err)
 	}
 }

@@ -29,9 +29,7 @@ func TestValidateConfig(t *testing.T) {
 	}
 
 	fp := "SHA256:" + strings.Repeat("a", 43)
-	// merge_gate.review: none — the default ("internal") requires a reviews_log,
-	// which is irrelevant to what this test exercises.
-	ok := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"},"merge_gate":{"review":"none"}}`)
+	ok := write(`{"format_version":1,"default_branch":"main","allowed_signers":"` + signers + `","roles":{"` + fp + `":"reviewer"}}`)
 	if rc := validateConfig([]string{"--config", ok}); rc != 0 {
 		t.Fatalf("valid config: rc = %d, want 0", rc)
 	}
@@ -86,13 +84,11 @@ func TestValidateConfig(t *testing.T) {
 
 // TestReviewRejectsUnknownEvent pins that prRun's `review` verb refuses an
 // unrecognized --event (e.g. a misspelling like "aprove") before doing
-// anything else in that case: no reviews_log record, no GitHub post. A silent
-// fall-through would either record a bogus verdict or (worse) still post a
-// COMMENT-type review to GitHub under a verdict nobody asked for.
+// anything else in that case — no GitHub post at all. A silent fall-through
+// would post a review to GitHub under a verdict nobody asked for.
 func TestReviewRejectsUnknownEvent(t *testing.T) {
 	reposDir := t.TempDir()
 	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
-	reviewsLog := filepath.Join(t.TempDir(), "reviews.jsonl")
 
 	fp := "SHA256:" + strings.Repeat("a", 43)
 	// upstream_slug is set explicitly so prRun reaches the "review" case
@@ -103,7 +99,7 @@ func TestReviewRejectsUnknownEvent(t *testing.T) {
 	// check above the switch does not short-circuit first either.
 	cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
 		`"roles":{"` + fp + `":"reviewer"},"action_roles":{"review":["reviewer"]},` +
-		`"upstream_slug":"acme/repo","reviews_log":"` + reviewsLog + `"}`
+		`"upstream_slug":"acme/repo"}`
 	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -116,9 +112,6 @@ func TestReviewRejectsUnknownEvent(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "review:") || !strings.Contains(errw.String(), `"aprove"`) {
 		t.Fatalf("expected a clear usage-style error naming the bad event, got %q", errw.String())
-	}
-	if _, err := os.Stat(reviewsLog); !os.IsNotExist(err) {
-		t.Fatalf("reviews_log must not be created/written for a rejected event, stat err = %v", err)
 	}
 }
 

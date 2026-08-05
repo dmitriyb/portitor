@@ -125,14 +125,51 @@ func (g GH) Comment(pr int, body string) error {
 	return err
 }
 
-// Review posts a COMMENT-type review with a plain markdown body, toward
-// GitHub, regardless of the caller's review verdict (approve/request-changes/
-// comment) — same-account safe: the PAT is typically the PR author's account,
-// and GitHub refuses self-approval (HTTP 422) but never a comment review. The
-// verdict itself lives only in the gate's own reviews_log (see ReviewRecord);
-// GH.Review is purely the GitHub-facing half of `review`.
-func (g GH) Review(pr int, body string) error {
-	_, err := g.run("pr", "review", strconv.Itoa(pr), "--comment", "--body", body)
+// reviewFlag maps the caller's verdict to the gh CLI review flag. review is a
+// transparent GitHub passthrough (see 2026-08-05-transparent-approve): the
+// caller's real verdict is submitted, not a forced COMMENT.
+func reviewFlag(verdict string) (string, error) {
+	switch verdict {
+	case "approve":
+		return "--approve", nil
+	case "request-changes":
+		return "--request-changes", nil
+	case "comment":
+		return "--comment", nil
+	default:
+		return "", fmt.Errorf("review: unknown verdict %q (want approve|request-changes|comment)", verdict)
+	}
+}
+
+// reviewEvent maps the caller's verdict to the REST/GraphQL "event" field
+// name (APPROVE|REQUEST_CHANGES|COMMENT) — used by ReviewInline's create-
+// review payload; the CLI-flag counterpart is reviewFlag, used by Review.
+func reviewEvent(verdict string) (string, error) {
+	switch verdict {
+	case "approve":
+		return "APPROVE", nil
+	case "request-changes":
+		return "REQUEST_CHANGES", nil
+	case "comment":
+		return "COMMENT", nil
+	default:
+		return "", fmt.Errorf("review: unknown verdict %q (want approve|request-changes|comment)", verdict)
+	}
+}
+
+// Review submits the caller's real GitHub review event — approve, request-
+// changes, or comment — via `gh pr review --<verdict>`, holding no gate state
+// of its own: review is a transparent GitHub passthrough. If GitHub refuses
+// the event (e.g. HTTP 422 when the PAT account approves its own PR), the
+// error is returned verbatim — a single account approving its own PR is a
+// topology/config problem, not one portitor papers over with invented state
+// (see 2026-08-05-transparent-approve).
+func (g GH) Review(pr int, verdict, body string) error {
+	flag, err := reviewFlag(verdict)
+	if err != nil {
+		return err
+	}
+	_, err = g.run("pr", "review", strconv.Itoa(pr), flag, "--body", body)
 	return err
 }
 
@@ -150,12 +187,17 @@ type ReviewSubmission struct {
 	Comments []InlineComment `json:"comments"`
 }
 
-// ReviewInline posts a COMMENT-type review carrying inline comments — each
-// comments[] entry raises a real review thread — via one REST call (POST
-// .../pulls/:pr/reviews with comments[]), then returns the ids of the review
-// threads it created (via a GraphQL reviewThreads query filtered to the
-// comments this review just posted), so the caller can record them.
-func (g GH) ReviewInline(pr int, body string, comments []InlineComment) ([]string, error) {
+// ReviewInline submits the caller's real GitHub review event carrying inline
+// comments — each comments[] entry raises a real review thread — via one
+// REST call (POST .../pulls/:pr/reviews with comments[]), then returns the
+// ids of the review threads it created (via a GraphQL reviewThreads query
+// filtered to the comments this review just posted). Same passthrough
+// contract as Review: a forge refusal is returned verbatim.
+func (g GH) ReviewInline(pr int, verdict, body string, comments []InlineComment) ([]string, error) {
+	event, err := reviewEvent(verdict)
+	if err != nil {
+		return nil, err
+	}
 	owner, name, err := g.ownerName()
 	if err != nil {
 		return nil, err
@@ -164,7 +206,7 @@ func (g GH) ReviewInline(pr int, body string, comments []InlineComment) ([]strin
 		Body     string          `json:"body"`
 		Event    string          `json:"event"`
 		Comments []InlineComment `json:"comments"`
-	}{Body: body, Event: "COMMENT", Comments: comments})
+	}{Body: body, Event: event, Comments: comments})
 	if err != nil {
 		return nil, fmt.Errorf("review --inline: marshal payload: %w", err)
 	}
@@ -289,11 +331,11 @@ func (g GH) Resolve(threadID string) error {
 // enforced the config's action policy and the merge preconditions), pinned to
 // headSHA via --match-head-commit. GitHub's own atomic re-check at merge time
 // covers only GitHub-enforced rules (branch protection, required checks); the
-// internal review verdict (reviews_log) is portitor's own and was recorded
-// against a specific head, so the merge must land exactly the head the
-// preconditions were evaluated against — an unpinned merge would be a
-// TOCTOU: a new commit landing on the branch between the precondition
-// evaluation and this call would ride in on an approval that never covered it.
+// git-content merge_gate.checks predicates were evaluated against a specific
+// head, so the merge must land exactly the head the preconditions were
+// evaluated against — an unpinned merge would be a TOCTOU: a new commit
+// landing on the branch between the precondition evaluation and this call
+// would ride in on preconditions that never covered it.
 func (g GH) Merge(pr int, headSHA string) error {
 	_, err := g.run("pr", "merge", strconv.Itoa(pr), "--squash", "--match-head-commit", headSHA)
 	return err
@@ -376,6 +418,40 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
   }
 }`
 
+// CurrentLogin returns the authenticated account's GitHub login (the PAT's
+// own account) — used to identify the gate's own review threads by author,
+// now that there is no reviews_log to consult (see
+// 2026-08-05-transparent-approve).
+func (g GH) CurrentLogin() (string, error) {
+	out, err := g.runAPI("api", "user", "--jq", ".login")
+	if err != nil {
+		return "", fmt.Errorf("gh api user: %w", err)
+	}
+	login := strings.TrimSpace(out)
+	if login == "" {
+		return "", fmt.Errorf("gh api user: empty login")
+	}
+	return login, nil
+}
+
+// GateAuthoredThreads filters threads to those the gate's own account
+// (login) authored — identified by the author of the thread's first (thread-
+// opening) comment — so a human-authored thread is never included. Pure and
+// testable: the caller (resolveGateThreads) already has both threads and
+// login in hand from I/O it performed itself.
+func GateAuthoredThreads(threads []ReviewThread, login string) []ReviewThread {
+	var out []ReviewThread
+	for _, th := range threads {
+		if len(th.Comments) == 0 {
+			continue
+		}
+		if th.Comments[0].Author == login {
+			out = append(out, th)
+		}
+	}
+	return out
+}
+
 // FetchReviewThreads runs the reviewThreads GraphQL query for pr.
 func (g GH) FetchReviewThreads(pr int) ([]ReviewThread, error) {
 	owner, name, err := g.ownerName()
@@ -437,7 +513,7 @@ type MergeState struct {
 	ReviewDecision    string     `json:"reviewDecision"`
 	MergeStateStatus  string     `json:"mergeStateStatus"`
 	HeadRefName       string     `json:"headRefName"`
-	HeadSHA           string     `json:"headRefOid"` // the PR's current head commit — reviews_log lookup key
+	HeadSHA           string     `json:"headRefOid"` // the PR's current head commit — pins the merge (see GH.Merge)
 	StatusCheckRollup []CheckRun `json:"statusCheckRollup"`
 }
 
@@ -483,13 +559,13 @@ func (g GH) FetchMergeState(pr int) (MergeState, error) {
 }
 
 // ReviewGateInput bundles the merge_gate.review precondition's already-
-// resolved evidence: the effective source (see MergeGateConfig.ReviewSource)
-// and, for "internal", whether reviews_log holds a qualifying approval.
-// Resolving InternalApproved is I/O (reviews_log) — UnmetMergePreconditions
-// stays a pure function over pre-fetched/pre-computed inputs.
+// resolved evidence: the effective source (see MergeGateConfig.ReviewSource).
+// "github" is checked against the re-derived MergeState.ReviewDecision;
+// "none" carries no review precondition here — the review gate, if any, is
+// expressed as a merge_gate.checks git-content predicate instead (see
+// 2026-08-05-transparent-approve).
 type ReviewGateInput struct {
-	Source           string // "internal" | "github" | "none"
-	InternalApproved bool   // only meaningful when Source == "internal"
+	Source string // "github" | "none"
 }
 
 // PredicateResult is one merge_gate.checks entry's already-run outcome (see
@@ -511,18 +587,14 @@ type PredicateResult struct {
 func UnmetMergePreconditions(st MergeState, requiredChecks []string, review ReviewGateInput, predicates []PredicateResult) ([]string, error) {
 	var unmet []string
 	switch review.Source {
-	case "", "internal":
-		if !review.InternalApproved {
-			unmet = append(unmet, "internal review: no reviews_log approval for the current head from a role action_roles allows to review")
-		}
+	case "", "none":
+		// No review precondition configured.
 	case "github":
 		if st.ReviewDecision != "APPROVED" {
 			unmet = append(unmet, fmt.Sprintf("review decision is %q, want APPROVED", st.ReviewDecision))
 		}
-	case "none":
-		// No review precondition configured.
 	default:
-		unmet = append(unmet, fmt.Sprintf("merge_gate.review has an unknown source %q (want internal|github|none)", review.Source))
+		unmet = append(unmet, fmt.Sprintf("merge_gate.review has an unknown source %q (want github|none)", review.Source))
 	}
 	if st.MergeStateStatus != "CLEAN" {
 		unmet = append(unmet, fmt.Sprintf("merge state is %q, want CLEAN (covers behind-base, conflicts, blocked)", st.MergeStateStatus))

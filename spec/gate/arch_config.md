@@ -72,10 +72,13 @@ keys** (`SHA256:` + 43 base64 chars — the shape git reports via `%GF`; anythin
 match a real signer, so it is dead weight that hides a typo'd revocation or grant) and non-empty
 role values, `action_roles` verbs from the closed set, `content_rules` compiling cleanly,
 `allowed_committer_emails` entries non-empty (an optional list; when present, the gate's
-committer-email rule compares against it byte-exact), `merge_gate.review` from
-`internal|github|none` with every `merge_gate.checks` entry carrying a name and a non-empty
-argv, and `reviews_log` (required when the effective review source is `internal` — the merge
-gate cannot consult a verdict that has nowhere to live).
+committer-email rule compares against it byte-exact), and `merge_gate.review` from
+`github|none` (default `none`) with every `merge_gate.checks` entry carrying a name and a
+non-empty argv. The retired `internal` review source and its `reviews_log` key are rejected by
+strict decode: a config still carrying `review: "internal"` or a `reviews_log` field fails to
+load (the upgrade-binary-first rule), since portitor no longer keeps a gate-owned verdict —
+approval is native GitHub (`review: github`) or a git-content `merge_gate.checks` predicate (see
+2026-08-05-transparent-approve).
 
 ## Boundaries
 

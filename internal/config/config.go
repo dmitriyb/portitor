@@ -42,14 +42,11 @@ type Settings struct {
 	// Empty disables the trail. Write failures never change a verdict.
 	AuditLog string `json:"audit_log"`
 	// MergeGate configures the merge review-precondition source and command
-	// predicates (spec/proposals/2026-08-04-merge-gate-v2.md). Absent block or
-	// absent review field both default to "internal" review source, no command
-	// predicates.
+	// predicates (spec/proposals/2026-08-05-transparent-approve.md). Absent
+	// block or absent review field both default to "none" review source, no
+	// command predicates. The retired "internal" source and its reviews_log
+	// key are gone: strict decode rejects a config still carrying either.
 	MergeGate *action.MergeGateConfig `json:"merge_gate"`
-	// ReviewsLog receives one appended, fsync'd JSON line per `review`
-	// verdict (action.ReviewRecord) — required when the effective
-	// merge_gate.review source is "internal" (see ReviewSource).
-	ReviewsLog string `json:"reviews_log"`
 	// IdentityOnlyRoles lists the roles whose keys must never gain
 	// commit-signing trust (landing-only identities). Classification is
 	// config, not code — portitor ships no role names. Absent = every role
@@ -57,9 +54,9 @@ type Settings struct {
 	IdentityOnlyRoles []string `json:"identity_only_roles"`
 }
 
-// ReviewSource returns the effective merge_gate.review source
-// (internal|github|none), defaulting to "internal" when merge_gate is absent
-// or its review field is empty (action.MergeGateConfig.ReviewSource).
+// ReviewSource returns the effective merge_gate.review source (github|none),
+// defaulting to "none" when merge_gate is absent or its review field is empty
+// (action.MergeGateConfig.ReviewSource).
 func (s Settings) ReviewSource() string {
 	return s.MergeGate.ReviewSource()
 }
@@ -216,7 +213,6 @@ var topLevelKeys = map[string]bool{
 	"audit_log":                       true,
 	"identity_only_roles":             true,
 	"merge_gate":                      true,
-	"reviews_log":                     true,
 }
 
 // dataMapKeys names the top-level keys whose object values are DATA maps
@@ -347,9 +343,9 @@ func Validate(s Settings) []string {
 	}
 	if s.MergeGate != nil {
 		switch s.MergeGate.Review {
-		case "", "internal", "github", "none":
+		case "", "github", "none":
 		default:
-			problems = append(problems, fmt.Sprintf("merge_gate.review must be internal, github, or none, got %q", s.MergeGate.Review))
+			problems = append(problems, fmt.Sprintf("merge_gate.review must be github or none, got %q (the retired \"internal\" source is no longer valid)", s.MergeGate.Review))
 		}
 		for i, c := range s.MergeGate.Checks {
 			if c.Name == "" {
@@ -364,9 +360,6 @@ func Validate(s Settings) []string {
 				}
 			}
 		}
-	}
-	if s.ReviewSource() == "internal" && s.ReviewsLog == "" {
-		problems = append(problems, "reviews_log is required when the effective merge_gate.review source is internal (the merge gate cannot consult a verdict that has nowhere to live)")
 	}
 	_, ruleProblems := rules.Compile(s.Content)
 	problems = append(problems, ruleProblems...)

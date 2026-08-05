@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,11 +131,9 @@ func runGit(t *testing.T, dir string, args ...string) string {
 }
 
 // rawGH runs the real gh CLI directly (bypassing internal/action.GH) — used
-// only for the empirical-probe scenarios that must observe behavior
-// portitor's own redesigned code path no longer exercises (e.g. an
-// approve-type review, which GH.Review deliberately never sends anymore).
-// This is test-harness code demonstrating an external fact, not action code —
-// the "gh only through the Runner seam" constraint scopes to internal/action.
+// for test-harness bookkeeping (scenario cleanup) that has no need to go
+// through the GH client. This is test-harness code, not action code — the
+// "gh only through the Runner seam" constraint scopes to internal/action.
 func rawGH(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("gh", args...)
@@ -224,23 +221,26 @@ func TestRealGH_ReviewDecisionState(t *testing.T) {
 	}
 }
 
-// ---- scenario 2: self-approval is refused (422) — the reason GH.Review never sends approve ----
+// ---- scenario 2: self-approval is refused (422) and GH.Review fails loudly ----
 
-// TestRealGH_SelfApproveRefused demonstrates the empirical fact the whole
-// redesign is built around: the PAT cannot APPROVE its own PR. It drives the
-// raw gh CLI directly (not internal/action.GH — GH.Review deliberately never
-// attempts an approve-type review anymore) to document why.
+// TestRealGH_SelfApproveRefused pins the empirical fact the whole redesign is
+// built around, AND that the redesigned code path itself fails loudly on it
+// (spec/proposals/2026-08-05-transparent-approve.md): review is now a
+// transparent passthrough — GH.Review(pr, "approve", ...) submits the caller's
+// real verdict, and when the PAT tries to approve its own PR, GitHub refuses
+// (HTTP 422) and the error propagates verbatim out of GH.Review, not silently
+// swallowed or downgraded to a no-op.
 func TestRealGH_SelfApproveRefused(t *testing.T) {
 	env := setupRealGH(t)
 	dir := cloneRepo(t, env)
 	branch, _ := pushBranch(t, env, dir, "realgh-selfapprove", "realgh-probe.txt", "probe\n")
 	pr := openPR(t, env, dir, branch)
 
-	out, err := rawGH(t, "pr", "review", strconv.Itoa(pr), "--approve", "--body", "self-approve probe", "-R", env.GH.Repo)
+	err := env.GH.Review(pr, "approve", "self-approve probe")
 	if err == nil {
-		t.Fatalf("self-approval should be refused by GitHub (422); gh pr review --approve succeeded:\n%s", out)
+		t.Fatal("self-approval should be refused by GitHub (422); GH.Review(approve) succeeded")
 	}
-	t.Logf("self-approve refused as expected: %s", out)
+	t.Logf("GH.Review(approve) failed loudly as expected: %v", err)
 }
 
 // ---- scenario 3+4: inline review raises a thread; reply lands in it ----
@@ -256,7 +256,7 @@ func TestRealGH_InlineReviewAndReply(t *testing.T) {
 	branch, _ := pushBranch(t, env, dir, "realgh-inline", "realgh-probe.txt", "line one\nline two\n")
 	pr := openPR(t, env, dir, branch)
 
-	threadIDs, err := env.GH.ReviewInline(pr, "automated inline review", []action.InlineComment{
+	threadIDs, err := env.GH.ReviewInline(pr, "comment", "automated inline review", []action.InlineComment{
 		{Path: "realgh-probe.txt", Line: 1, Body: "inline comment from the realgh suite"},
 	})
 	if err != nil {
@@ -312,7 +312,7 @@ func TestRealGH_ResolveUnblocksMergeState(t *testing.T) {
 	branch, _ := pushBranch(t, env, dir, "realgh-resolve", "realgh-probe.txt", "line one\n")
 	pr := openPR(t, env, dir, branch)
 
-	threadIDs, err := env.GH.ReviewInline(pr, "automated inline review", []action.InlineComment{
+	threadIDs, err := env.GH.ReviewInline(pr, "comment", "automated inline review", []action.InlineComment{
 		{Path: "realgh-probe.txt", Line: 1, Body: "please address"},
 	})
 	if err != nil {
@@ -375,22 +375,27 @@ func TestRealGH_SquashMergeWorks(t *testing.T) {
 	t.Logf("post-merge mergeStateStatus = %q", st.MergeStateStatus)
 }
 
-// ---- scenario 7: the full v2 merge-gate pass ----
+// ---- scenario 7: the single-account bead-closed-predicate merge pass ----
 
-// TestRealGH_FullMergeGatePass drives the same sequence prRun's merge/review
-// verbs perform, but calling internal/action + internal/check directly
-// (rather than going through the SSH/role-gating layer, which needs a
-// provisioned repo config outside this suite's scope): open a PR, raise +
-// resolve an inline review thread, record an internal approval, satisfy a
-// trivial command predicate, then confirm UnmetMergePreconditions reports
-// nothing unmet against the re-derived real GitHub state.
+// TestRealGH_FullMergeGatePass drives the SINGLE-ACCOUNT world (spec/
+// proposals/2026-08-05-transparent-approve.md): the PAT cannot natively
+// approve its own PR, so the review gate is expressed as a merge_gate.checks
+// predicate over git content instead (e.g. a reviewer-signed bead-close, read
+// at the current head) — never a gate-owned reviews_log verdict, which is
+// retired. This scenario opens a PR, raises + resolves an inline review
+// thread (the gate's own account authored it, exactly as review --event
+// approve's auto-resolve targets), then confirms UnmetMergePreconditions
+// reports nothing unmet with review source "none" and a satisfied checks
+// predicate — calling internal/action directly (rather than through the SSH/
+// role-gating layer, which needs a provisioned repo config outside this
+// suite's scope) against the re-derived real GitHub state.
 func TestRealGH_FullMergeGatePass(t *testing.T) {
 	env := setupRealGH(t)
 	dir := cloneRepo(t, env)
 	branch, headSHA := pushBranch(t, env, dir, "realgh-fullpass", "realgh-probe.txt", "full pass\n")
 	pr := openPR(t, env, dir, branch)
 
-	threadIDs, err := env.GH.ReviewInline(pr, "automated full-pass review", []action.InlineComment{
+	threadIDs, err := env.GH.ReviewInline(pr, "comment", "automated full-pass review", []action.InlineComment{
 		{Path: "realgh-probe.txt", Line: 1, Body: "nit: automated"},
 	})
 	if err != nil {
@@ -402,22 +407,6 @@ func TestRealGH_FullMergeGatePass(t *testing.T) {
 		}
 	}
 
-	reviewsLog := filepath.Join(t.TempDir(), "reviews.jsonl")
-	if err := action.AppendReview(reviewsLog, action.ReviewRecord{
-		PR: pr, HeadSHA: headSHA, Fingerprint: "SHA256:" + strings.Repeat("a", 43),
-		Role: "reviewer", Event: "approve", Threads: threadIDs,
-	}); err != nil {
-		t.Fatalf("AppendReview: %v", err)
-	}
-	actionRoles := map[string][]string{"review": {"reviewer"}}
-	approved, err := action.InternalApproval(reviewsLog, pr, headSHA, actionRoles)
-	if err != nil {
-		t.Fatalf("InternalApproval: %v", err)
-	}
-	if !approved {
-		t.Fatal("InternalApproval should report approved for the just-recorded verdict")
-	}
-
 	st, err := env.GH.FetchMergeState(pr)
 	if err != nil {
 		t.Fatalf("FetchMergeState: %v", err)
@@ -426,13 +415,20 @@ func TestRealGH_FullMergeGatePass(t *testing.T) {
 		t.Fatalf("head moved between push and fetch (%s vs %s) — rerun", st.HeadSHA, headSHA)
 	}
 
-	unmet, err := action.UnmetMergePreconditions(st, nil,
-		action.ReviewGateInput{Source: "internal", InternalApproved: approved}, nil)
+	// The reviewer's verdict, single-account style: a satisfied git-content
+	// predicate (e.g. "bead-closed") — represented here as an already-run
+	// PredicateResult, exactly what cmd/portitor's runMergeChecks produces
+	// after actually invoking the configured command via check.RunPredicate
+	// (that re-exec trampoline has its own dedicated test coverage in
+	// internal/check; this scenario's scope is the merge-gate evaluation).
+	predicates := []action.PredicateResult{{Name: "bead-closed", Met: true}}
+
+	unmet, err := action.UnmetMergePreconditions(st, nil, action.ReviewGateInput{Source: "none"}, predicates)
 	if err != nil {
 		t.Fatalf("UnmetMergePreconditions: %v", err)
 	}
 	if len(unmet) != 0 {
-		t.Fatalf("full v2 pass should have nothing unmet, got: %v (mergeStateStatus=%q)", unmet, st.MergeStateStatus)
+		t.Fatalf("single-account bead-closed-predicate pass should have nothing unmet, got: %v (mergeStateStatus=%q)", unmet, st.MergeStateStatus)
 	}
 
 	// Pinned to st.HeadSHA — the exact head UnmetMergePreconditions was just
@@ -460,16 +456,16 @@ func TestRealGH_PreciseRefusalList(t *testing.T) {
 	}
 
 	unmet, err := action.UnmetMergePreconditions(st, []string{"definitely-not-a-configured-check"},
-		action.ReviewGateInput{Source: "internal", InternalApproved: false},
+		action.ReviewGateInput{Source: "github"},
 		[]action.PredicateResult{{Name: "always-unmet", Met: false}})
 	if err != nil {
 		t.Fatalf("UnmetMergePreconditions: %v", err)
 	}
 	if len(unmet) < 2 {
-		t.Fatalf("want multiple precisely-named unmet preconditions (no internal approval, missing required check, unmet predicate), got: %v", unmet)
+		t.Fatalf("want multiple precisely-named unmet preconditions (no reviewDecision APPROVED, missing required check, unmet predicate), got: %v", unmet)
 	}
 	joined := strings.Join(unmet, "\n")
-	for _, want := range []string{"internal review", "definitely-not-a-configured-check", "always-unmet"} {
+	for _, want := range []string{"review decision", "definitely-not-a-configured-check", "always-unmet"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("refusal list missing a precise mention of %q:\n%s", want, joined)
 		}

@@ -289,7 +289,7 @@ func newPrCmd(actorFingerprint func() string) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&prNum, "pr", 0, "PR number")
-	cmd.Flags().StringVar(&event, "event", "", "review verdict: approve|request-changes|comment (recorded internally; GitHub always sees a COMMENT-type review)")
+	cmd.Flags().StringVar(&event, "event", "", "review verdict: approve|request-changes|comment (submitted as the real GitHub review event)")
 	cmd.Flags().StringVar(&repo, "repo", "", "repository name (selects the per-repo config)")
 	cmd.Flags().StringVar(&thread, "thread", "", "review thread id (reply, resolve)")
 	cmd.Flags().BoolVar(&inline, "inline", false, "review: read {body, comments:[{path,line,body}]} JSON from stdin and raise inline threads")

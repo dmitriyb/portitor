@@ -69,17 +69,17 @@ func TestIdentityOnly(t *testing.T) {
 	}
 }
 
-// TestReviewSource pins the default-to-internal resolution: absent block,
-// absent field, and an explicit value all resolve per
+// TestReviewSource pins the default-to-none resolution: absent block, absent
+// field, and an explicit value all resolve per
 // action.MergeGateConfig.ReviewSource.
 func TestReviewSource(t *testing.T) {
-	if got := (Settings{}).ReviewSource(); got != "internal" {
-		t.Fatalf("absent merge_gate: %q, want internal", got)
+	if got := (Settings{}).ReviewSource(); got != "none" {
+		t.Fatalf("absent merge_gate: %q, want none", got)
 	}
-	if got := (Settings{MergeGate: &action.MergeGateConfig{}}).ReviewSource(); got != "internal" {
-		t.Fatalf("absent review field: %q, want internal", got)
+	if got := (Settings{MergeGate: &action.MergeGateConfig{}}).ReviewSource(); got != "none" {
+		t.Fatalf("absent review field: %q, want none", got)
 	}
-	for _, src := range []string{"internal", "github", "none"} {
+	for _, src := range []string{"github", "none"} {
 		if got := (Settings{MergeGate: &action.MergeGateConfig{Review: src}}).ReviewSource(); got != src {
 			t.Fatalf("explicit %q: got %q", src, got)
 		}
@@ -121,12 +121,7 @@ func TestValidate(t *testing.T) {
 		DefaultBranch:  "main",
 		AllowedSigners: signers,
 		Roles:          map[string]string{fp: "reviewer"},
-	},
-		// The default merge_gate.review source is "internal", which requires a
-		// reviews_log — set here so "good" stays a minimal valid config; the
-		// merge_gate/reviews_log-specific cases below vary this deliberately.
-		ReviewsLog: filepath.Join(dir, "reviews.jsonl"),
-	}
+	}}
 	if p := Validate(good); len(p) != 0 {
 		t.Fatalf("valid config returned problems: %v", p)
 	}
@@ -174,35 +169,28 @@ func TestValidate(t *testing.T) {
 		t.Fatal("an empty allowed_committer_emails entry should be invalid (it can never match)")
 	}
 
-	// merge_gate / reviews_log: absent merge_gate defaults to "internal", which
-	// requires reviews_log (already asserted valid above, since "good" sets one).
-	noReviewsLog := good
-	noReviewsLog.ReviewsLog = "" // no MergeGate, no ReviewsLog: effective source is internal
-	if p := Validate(noReviewsLog); len(p) == 0 {
-		t.Fatal("effective internal review source with no reviews_log should be invalid")
-	}
+	// merge_gate.review: absent merge_gate, "github", and "none" are all valid;
+	// the retired "internal" source is rejected (see
+	// 2026-08-05-transparent-approve).
 	githubSource := good
-	githubSource.ReviewsLog = ""
 	githubSource.MergeGate = &action.MergeGateConfig{Review: "github"}
 	if p := Validate(githubSource); len(p) != 0 {
-		t.Fatalf("github review source needs no reviews_log: %v", p)
+		t.Fatalf("github review source should validate: %v", p)
 	}
 	noneSource := good
-	noneSource.ReviewsLog = ""
 	noneSource.MergeGate = &action.MergeGateConfig{Review: "none"}
 	if p := Validate(noneSource); len(p) != 0 {
-		t.Fatalf("none review source needs no reviews_log: %v", p)
+		t.Fatalf("none review source should validate: %v", p)
 	}
 	badSource := good
 	badSource.MergeGate = &action.MergeGateConfig{Review: "bogus"}
 	if p := Validate(badSource); len(p) == 0 {
 		t.Fatal("an unknown merge_gate.review value should be invalid")
 	}
-	explicitInternalNoLog := good
-	explicitInternalNoLog.ReviewsLog = ""
-	explicitInternalNoLog.MergeGate = &action.MergeGateConfig{Review: "internal"}
-	if p := Validate(explicitInternalNoLog); len(p) == 0 {
-		t.Fatal("explicit internal review source with no reviews_log should be invalid")
+	retiredInternalSource := good
+	retiredInternalSource.MergeGate = &action.MergeGateConfig{Review: "internal"}
+	if p := Validate(retiredInternalSource); len(p) == 0 {
+		t.Fatal("the retired internal review source should be invalid")
 	}
 	goodChecks := good
 	goodChecks.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "bead-closed", Command: []string{"br", "--no-db"}}}}
@@ -252,13 +240,13 @@ func TestDecodeDiscipline(t *testing.T) {
 	}
 
 	withMergeGate := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"},` +
-		`"reviews_log":"/var/lib/portitor/reviews.jsonl","merge_gate":{"review":"internal","checks":[{"name":"bead-closed","command":["br","--no-db"]}]}}`
+		`"merge_gate":{"review":"github","checks":[{"name":"bead-closed","command":["br","--no-db"]}]}}`
 	if s, err := LoadFile(write(t, withMergeGate)); err != nil {
 		t.Fatalf("merge_gate config: %v", err)
-	} else if s.ReviewsLog != "/var/lib/portitor/reviews.jsonl" || s.MergeGate == nil ||
-		s.MergeGate.Review != "internal" || len(s.MergeGate.Checks) != 1 ||
+	} else if s.MergeGate == nil ||
+		s.MergeGate.Review != "github" || len(s.MergeGate.Checks) != 1 ||
 		s.MergeGate.Checks[0].Name != "bead-closed" || len(s.MergeGate.Checks[0].Command) != 2 {
-		t.Fatalf("merge_gate/reviews_log decoded as %+v", s)
+		t.Fatalf("merge_gate decoded as %+v", s)
 	}
 
 	// merge_gate absent entirely, and merge_gate present with an absent
@@ -292,6 +280,10 @@ func TestDecodeDiscipline(t *testing.T) {
 		"cased merge_gate check key": `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"merge_gate":{"checks":[{"Name":"x","command":["a"]}]}}`,
 		"non-object top":             `[1,2,3]`,
 		"trailing content":           `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{}}{"roles":{"` + fp + `":"owner"}}`,
+		// The retired reviews_log top-level key: strict decode's token-level
+		// key check must refuse it as unknown, not silently accept and drop it
+		// (see 2026-08-05-transparent-approve).
+		"retired reviews_log key": `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{},"reviews_log":"/var/lib/portitor/reviews.jsonl"}`,
 	}
 	for name, body := range bad {
 		t.Run(name, func(t *testing.T) {

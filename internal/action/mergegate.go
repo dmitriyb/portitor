@@ -6,10 +6,12 @@ package action
 // merge. It lives here (not internal/config) because UnmetMergePreconditions
 // needs the type and internal/config already depends on internal/action.
 type MergeGateConfig struct {
-	// Review selects the merge review-precondition source: "internal" (a
-	// reviews_log approval for the current head), "github" (legacy
-	// reviewDecision == APPROVED), or "none" (no review precondition). Empty
-	// defaults to "internal" — see ReviewSource.
+	// Review selects the merge review-precondition source: "github" (native
+	// reviewDecision == APPROVED — separated-account deployments) or "none"
+	// (no review precondition here; express it as a merge_gate.checks git-
+	// content predicate instead). Empty defaults to "none" — see ReviewSource.
+	// The retired "internal" source (a gate-owned reviews_log verdict) is no
+	// longer valid (see 2026-08-05-transparent-approve).
 	Review string `json:"review"`
 	// Checks are named command predicates run in the bare repo dir with the PR
 	// number and head SHA appended as the final two argv elements.
@@ -26,14 +28,13 @@ type CheckPredicate struct {
 }
 
 // ReviewSource returns the effective merge_gate.review source. A nil block or
-// an empty review field both default to "internal": the old hardcoded
-// reviewDecision == APPROVED check could never merge in the single-account
-// deployments portitor targets (see the proposal's empirical findings), so
-// the safer, always-satisfiable default is the gate's own cryptographically
-// attributed verdict.
+// an empty review field both default to "none": portitor invents no gate — an
+// absent merge_gate means only the mandatory CLEAN check and required_checks
+// apply, and a deployment that wants a review precondition declares "github"
+// or a merge_gate.checks predicate (see 2026-08-05-transparent-approve).
 func (m *MergeGateConfig) ReviewSource() string {
 	if m == nil || m.Review == "" {
-		return "internal"
+		return "none"
 	}
 	return m.Review
 }
