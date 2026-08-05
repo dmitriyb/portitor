@@ -16,6 +16,13 @@ type MergeGateConfig struct {
 	// Checks are named command predicates run in the bare repo dir with the PR
 	// number and head SHA appended as the final two argv elements.
 	Checks []CheckPredicate `json:"checks"`
+	// MergeMethod selects the `gh pr merge` strategy: "squash" (default),
+	// "merge", or "rebase". Empty defaults to "squash" — see
+	// MergeMethodOrDefault. The repo must allow the chosen method (GitHub
+	// rejects e.g. --merge when merge commits are disabled); that error is
+	// forwarded verbatim rather than second-guessed here (see
+	// 2026-08-05-configurable-merge-method).
+	MergeMethod string `json:"merge_method"`
 }
 
 // CheckPredicate is one merge_gate.checks entry: a named, explicit-argv
@@ -37,4 +44,15 @@ func (m *MergeGateConfig) ReviewSource() string {
 		return "none"
 	}
 	return m.Review
+}
+
+// MergeMethodOrDefault returns the effective merge_gate.merge_method. A nil
+// block or an empty field both default to "squash" — today's hardcoded
+// behavior — so an absent field is byte-identical to before this was
+// configurable (see 2026-08-05-configurable-merge-method).
+func (m *MergeGateConfig) MergeMethodOrDefault() string {
+	if m == nil || m.MergeMethod == "" {
+		return "squash"
+	}
+	return m.MergeMethod
 }

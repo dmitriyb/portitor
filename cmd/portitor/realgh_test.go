@@ -365,7 +365,7 @@ func TestRealGH_SquashMergeWorks(t *testing.T) {
 	branch, headSHA := pushBranch(t, env, dir, "realgh-squash", "realgh-probe.txt", "squash me\n")
 	pr := openPR(t, env, dir, branch)
 
-	if err := env.GH.Merge(pr, headSHA); err != nil {
+	if err := env.GH.Merge(pr, "squash", headSHA); err != nil {
 		t.Fatalf("Merge: %v (if this repo requires reviews/checks/conversation-resolution, the merge may be blocked GitHub-side even though this scenario does not evaluate portitor's own preconditions)", err)
 	}
 	st, err := env.GH.FetchMergeState(pr)
@@ -433,7 +433,7 @@ func TestRealGH_FullMergeGatePass(t *testing.T) {
 
 	// Pinned to st.HeadSHA — the exact head UnmetMergePreconditions was just
 	// evaluated against — mirroring what prRun's merge verb does.
-	if err := env.GH.Merge(pr, st.HeadSHA); err != nil {
+	if err := env.GH.Merge(pr, "squash", st.HeadSHA); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
 }

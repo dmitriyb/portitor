@@ -86,6 +86,23 @@ func TestReviewSource(t *testing.T) {
 	}
 }
 
+// TestMergeMethod pins the default-to-squash resolution: absent block, absent
+// field, and an explicit value all resolve per
+// action.MergeGateConfig.MergeMethodOrDefault.
+func TestMergeMethod(t *testing.T) {
+	if got := (Settings{}).MergeMethod(); got != "squash" {
+		t.Fatalf("absent merge_gate: %q, want squash", got)
+	}
+	if got := (Settings{MergeGate: &action.MergeGateConfig{}}).MergeMethod(); got != "squash" {
+		t.Fatalf("absent merge_method field: %q, want squash", got)
+	}
+	for _, method := range []string{"squash", "merge", "rebase"} {
+		if got := (Settings{MergeGate: &action.MergeGateConfig{MergeMethod: method}}).MergeMethod(); got != method {
+			t.Fatalf("explicit %q: got %q", method, got)
+		}
+	}
+}
+
 // TestLoadRequiresConfigPath: the hook consumers must refuse to run without a
 // config — a gate with a zero config is not uniformly fail-closed.
 func TestLoadRequiresConfigPath(t *testing.T) {
@@ -211,6 +228,25 @@ func TestValidate(t *testing.T) {
 	emptyArgvCheck.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "x", Command: []string{"br", ""}}}}
 	if p := Validate(emptyArgvCheck); len(p) == 0 {
 		t.Fatal("a check predicate with an empty argv element should be invalid")
+	}
+
+	// merge_gate.merge_method: absent merge_gate and ""/squash/merge/rebase
+	// are all valid; anything else is rejected (see
+	// 2026-08-05-configurable-merge-method).
+	if p := Validate(good); len(p) != 0 {
+		t.Fatalf("absent merge_gate (default merge_method) should validate: %v", p)
+	}
+	for _, method := range []string{"", "squash", "merge", "rebase"} {
+		okMethod := good
+		okMethod.MergeGate = &action.MergeGateConfig{MergeMethod: method}
+		if p := Validate(okMethod); len(p) != 0 {
+			t.Fatalf("merge_method %q should validate: %v", method, p)
+		}
+	}
+	badMethod := good
+	badMethod.MergeGate = &action.MergeGateConfig{MergeMethod: "fast-forward"}
+	if p := Validate(badMethod); len(p) == 0 {
+		t.Fatal("an unknown merge_gate.merge_method value should be invalid")
 	}
 }
 

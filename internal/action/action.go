@@ -327,17 +327,39 @@ func (g GH) Resolve(threadID string) error {
 	return err
 }
 
-// Merge squash-merges a PR (the landing action; the caller has already
-// enforced the config's action policy and the merge preconditions), pinned to
-// headSHA via --match-head-commit. GitHub's own atomic re-check at merge time
-// covers only GitHub-enforced rules (branch protection, required checks); the
-// git-content merge_gate.checks predicates were evaluated against a specific
-// head, so the merge must land exactly the head the preconditions were
-// evaluated against — an unpinned merge would be a TOCTOU: a new commit
-// landing on the branch between the precondition evaluation and this call
-// would ride in on preconditions that never covered it.
-func (g GH) Merge(pr int, headSHA string) error {
-	_, err := g.run("pr", "merge", strconv.Itoa(pr), "--squash", "--match-head-commit", headSHA)
+// mergeMethodFlag maps merge_gate.merge_method to the gh CLI merge-strategy
+// flag. An unexpected value errors rather than silently defaulting:
+// config.Validate should have already caught it, but Merge fails closed too.
+func mergeMethodFlag(method string) (string, error) {
+	switch method {
+	case "squash":
+		return "--squash", nil
+	case "merge":
+		return "--merge", nil
+	case "rebase":
+		return "--rebase", nil
+	default:
+		return "", fmt.Errorf("merge: unknown method %q (want squash|merge|rebase)", method)
+	}
+}
+
+// Merge lands a PR (the landing action; the caller has already enforced the
+// config's action policy and the merge preconditions) using the configured
+// method — squash, merge, or rebase (merge_gate.merge_method, see
+// mergeMethodFlag) — pinned to headSHA via --match-head-commit for every
+// method. GitHub's own atomic re-check at merge time covers only GitHub-
+// enforced rules (branch protection, required checks); the git-content
+// merge_gate.checks predicates were evaluated against a specific head, so the
+// merge must land exactly the head the preconditions were evaluated against —
+// an unpinned merge would be a TOCTOU: a new commit landing on the branch
+// between the precondition evaluation and this call would ride in on
+// preconditions that never covered it.
+func (g GH) Merge(pr int, method, headSHA string) error {
+	flag, err := mergeMethodFlag(method)
+	if err != nil {
+		return err
+	}
+	_, err = g.run("pr", "merge", strconv.Itoa(pr), flag, "--match-head-commit", headSHA)
 	return err
 }
 

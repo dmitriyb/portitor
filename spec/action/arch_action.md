@@ -150,6 +150,14 @@ merge window could land a head a `merge_gate.checks` predicate never evaluated. 
 the merge (TOCTOU closed for both rule sources). Operators should additionally enable GitHub branch
 protection (required checks + require-up-to-date) as defense in depth.
 
+The **merge method** is config, not hardcoded: `merge_gate.merge_method` selects `squash`
+(default), `merge`, or `rebase`, mapped to the corresponding `gh pr merge` flag (the head-pin
+applies to all three). The method decides the default branch's landed history — a squash lands one
+GitHub-signed commit and collapses the branch's commits, while `merge`/`rebase` preserve them
+(including any role-key-signed commits) with their signatures. The repo must allow the chosen
+method; GitHub's refusal (e.g. `--merge` with merge commits disabled) is forwarded verbatim. See
+2026-08-05-configurable-merge-method.
+
 ## Audit trail
 
 Every L1 gate decision (accept/reject/operational error, malformed hook stdin included), every

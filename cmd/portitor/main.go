@@ -511,7 +511,7 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		// against, so a state change (or a new commit) landing since the query
 		// fails there (TOCTOU closed GitHub-side) rather than silently merging a
 		// head the internal review verdict never covered.
-		if err := gh.Merge(prNum, st.HeadSHA); err != nil {
+		if err := gh.Merge(prNum, s.MergeMethod(), st.HeadSHA); err != nil {
 			return fail(err)
 		}
 	case "close":

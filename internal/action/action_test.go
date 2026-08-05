@@ -378,13 +378,77 @@ func TestFetchMergesReviewThreads(t *testing.T) {
 // head.
 func TestMergeIsHeadPinned(t *testing.T) {
 	run, last := stub("", nil)
-	if err := (GH{Repo: "o/r", Run: run}).Merge(9, "deadbeefcafe"); err != nil {
+	if err := (GH{Repo: "o/r", Run: run}).Merge(9, "squash", "deadbeefcafe"); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(*last, " ")
 	for _, want := range []string{"pr merge 9", "--squash", "--match-head-commit deadbeefcafe"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("merge args %q missing %q", got, want)
+		}
+	}
+}
+
+// TestMergeMethodFlag pins the merge_gate.merge_method -> gh pr merge flag
+// mapping (2026-08-05-configurable-merge-method): each configured method
+// issues its own flag, and --match-head-commit is present regardless of
+// method — the TOCTOU close applies to every merge strategy.
+func TestMergeMethodFlag(t *testing.T) {
+	cases := []struct {
+		method   string
+		wantFlag string
+	}{
+		{"squash", "--squash"},
+		{"merge", "--merge"},
+		{"rebase", "--rebase"},
+	}
+	for _, c := range cases {
+		t.Run(c.method, func(t *testing.T) {
+			run, last := stub("", nil)
+			if err := (GH{Repo: "o/r", Run: run}).Merge(9, c.method, "deadbeefcafe"); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(*last, " ")
+			if !strings.Contains(got, "pr merge 9") || !strings.Contains(got, c.wantFlag) || !strings.Contains(got, "--match-head-commit deadbeefcafe") {
+				t.Fatalf("merge args = %q, want %q + --match-head-commit", got, c.wantFlag)
+			}
+			for _, other := range []string{"--squash", "--merge", "--rebase"} {
+				if other != c.wantFlag && strings.Contains(got, other) {
+					t.Fatalf("args %q must carry only %q, not %q", got, c.wantFlag, other)
+				}
+			}
+		})
+	}
+}
+
+// TestMergeUnknownMethod pins that an unrecognized merge_method is rejected
+// before any gh call is attempted — config.Validate should already have
+// caught it, but Merge fails closed too rather than silently defaulting.
+func TestMergeUnknownMethod(t *testing.T) {
+	run, last := stub("", nil)
+	if err := (GH{Repo: "o/r", Run: run}).Merge(9, "fast-forward", "deadbeefcafe"); err == nil {
+		t.Fatal("unknown merge method must error")
+	}
+	if *last != nil {
+		t.Fatalf("gh must not be called for an unknown merge method, got args %v", *last)
+	}
+}
+
+// TestMergeMethodOrDefault pins the default-to-squash resolution
+// (MergeGateConfig.MergeMethodOrDefault): a nil block, an empty field, and
+// each explicit value all resolve as expected — byte-identical to the
+// pre-configurable hardcoded --squash when merge_method is absent.
+func TestMergeMethodOrDefault(t *testing.T) {
+	var nilBlock *MergeGateConfig
+	if got := nilBlock.MergeMethodOrDefault(); got != "squash" {
+		t.Fatalf("nil block: got %q, want squash", got)
+	}
+	if got := (&MergeGateConfig{}).MergeMethodOrDefault(); got != "squash" {
+		t.Fatalf("empty field: got %q, want squash", got)
+	}
+	for _, method := range []string{"squash", "merge", "rebase"} {
+		if got := (&MergeGateConfig{MergeMethod: method}).MergeMethodOrDefault(); got != method {
+			t.Fatalf("explicit %q: got %q", method, got)
 		}
 	}
 }

@@ -61,6 +61,13 @@ func (s Settings) ReviewSource() string {
 	return s.MergeGate.ReviewSource()
 }
 
+// MergeMethod returns the effective merge_gate.merge_method (squash|merge|
+// rebase), defaulting to "squash" when merge_gate is absent or its
+// merge_method field is empty (action.MergeGateConfig.MergeMethodOrDefault).
+func (s Settings) MergeMethod() string {
+	return s.MergeGate.MergeMethodOrDefault()
+}
+
 // IdentityOnly reports whether role is one of the config's identity-only
 // (landing-only) roles.
 func (s Settings) IdentityOnly(role string) bool {
@@ -346,6 +353,11 @@ func Validate(s Settings) []string {
 		case "", "github", "none":
 		default:
 			problems = append(problems, fmt.Sprintf("merge_gate.review must be github or none, got %q (the retired \"internal\" source is no longer valid)", s.MergeGate.Review))
+		}
+		switch s.MergeGate.MergeMethod {
+		case "", "squash", "merge", "rebase":
+		default:
+			problems = append(problems, fmt.Sprintf("merge_gate.merge_method must be squash, merge, or rebase, got %q", s.MergeGate.MergeMethod))
 		}
 		for i, c := range s.MergeGate.Checks {
 			if c.Name == "" {
