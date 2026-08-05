@@ -13,8 +13,9 @@
 # --- build ---
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY cmd ./cmd
+COPY cli ./cli
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -o /out/portitor ./cmd/portitor
 

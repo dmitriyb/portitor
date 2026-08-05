@@ -45,8 +45,8 @@ func seedRepo(t *testing.T, roles, extraSignerLines string) (reposDir, cfgPath, 
 	cfgPath = filepath.Join(reposDir, "myrepo.json")
 	// identity_only_roles is config, not code: the fixtures declare "merger"
 	// landing-only, matching the recommended deployment policy. merge_gate.review
-	// is set to "none" — the default ("internal") requires a reviews_log, which
-	// is irrelevant to what these add-role tests exercise.
+	// is set to "none" explicitly (it is also the default) since these add-role
+	// tests exercise none of the review machinery.
 	body := `{"format_version":1,"default_branch":"main","allowed_signers":"` + signersPath +
 		`","identity_only_roles":["merger"],"merge_gate":{"review":"none"},"roles":` + roles + `}`
 	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {

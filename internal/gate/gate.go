@@ -113,8 +113,12 @@ type Config struct {
 	Content *rules.ContentRules `json:"content_rules"`
 	// RetiredRoleRules is a sentinel for the retired role_rules key: a config
 	// still carrying it refuses to gate with a migration message — the old
-	// rules are never silently dropped.
-	RetiredRoleRules json.RawMessage `json:"role_rules"`
+	// rules are never silently dropped. omitempty so a clean config (no
+	// role_rules) round-trips through marshal→unmarshal without emitting a
+	// spurious "role_rules": null that the decode would then flag as retired;
+	// detection on decode is unaffected (a real role_rules value still lands
+	// here and trips the check).
+	RetiredRoleRules json.RawMessage `json:"role_rules,omitempty"`
 	// RequireUpToDateWithDefault, when true, rejects a feature-branch update whose
 	// tip does not contain the current default-branch tip (i.e. it is based on a
 	// stale default). The deterministic start-task wrapper branches from the current
@@ -370,29 +374,6 @@ func isAncestor(repoDir, ancestor, descendant string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("merge-base --is-ancestor: %w", err)
-}
-
-// SignerFingerprints returns the set of signer key fingerprints (%GF) over the
-// commits base..tip, using the same hermetic, trust-root-pinned verification as
-// the gate. It backs the action layer's separation-of-duties check ("the
-// requesting key must not have signed any commit the PR introduces"); any
-// enumeration or verification failure is the caller's to fail closed on.
-func SignerFingerprints(repoDir, base, tip, allowedSigners string) (map[string]bool, error) {
-	commits, err := newCommits(repoDir, RefUpdate{OldSHA: base, NewSHA: tip})
-	if err != nil {
-		return nil, err
-	}
-	fps := make(map[string]bool)
-	for _, c := range commits {
-		_, fp, _, _, err := commitSig(repoDir, c, allowedSigners)
-		if err != nil {
-			return nil, err
-		}
-		if fp != "" {
-			fps[fp] = true
-		}
-	}
-	return fps, nil
 }
 
 func sigReason(status string) string {

@@ -78,40 +78,50 @@ via one GraphQL query (`reviewThreads`) merged into the existing JSON, so a fix 
 feedback deterministically and addressed-state is data, not inference. `reply --pr N --thread
 <id>` answers INTO a thread (body on stdin; GraphQL `addPullRequestReviewThreadReply`).
 `resolve --pr N --thread <id>` resolves one (`resolveReviewThread`); `resolve --pr N
---gate-threads` resolves every unresolved thread the gate's own reviews created (recorded ids —
-human-authored threads are never auto-resolved by the gate). Thread enumeration reads the first
+--gate-threads` resolves every unresolved thread the gate's own reviews created — the gate's own
+identified by author (the gate's PAT account), so human-authored threads are never auto-resolved
+by the gate. Thread enumeration reads the first
 100 threads per query (no pagination in this pass): beyond that, resolution may take another
 round — merge stays safe regardless, gated by the mandatory `CLEAN` check.
 
-### The review record (internal verdict)
+### review is a transparent GitHub passthrough
 
-`review` posts to GitHub as a COMMENT-type review — same-account safe: the PAT is typically the
-PR author's account, and GitHub refuses self-approval — and records its verdict in gate-owned
-state: one appended, fsync'd JSON line at the config's `reviews_log` path carrying
-`{time, pr, head_sha, fingerprint, role, event, threads}`, where `head_sha` is the PR head at
-review time and `threads` are the ids of threads this review created (captured after submission
-via GraphQL). With `--inline`, stdin is a JSON document `{"body": <md>, "comments": [{"path",
-"line", "body"}, ...]}` so an agent review raises real inline threads; without it, stdin is the
-plain markdown body as before. Lookup is last-wins per (pr, head_sha): a new push invalidates any
-prior verdict by construction. `review --event approve` additionally auto-resolves the gate's own
-unresolved threads on that PR, and remains guarded by the separation-of-duties check below.
+`review --event <approve|request-changes|comment>` submits the caller's **real** GitHub review
+event and holds no gate state — portitor forwards the action, it does not record a verdict. With
+`--inline`, stdin is a JSON document `{"body": <md>, "comments": [{"path", "line", "body"}, ...]}`
+carried on that one native review so an agent raises real inline threads; without it, stdin is the
+plain markdown body. If the forge refuses the event — GitHub returns HTTP 422 when the PAT account
+approves its own PR — the gate fails loudly and forwards the error verbatim; a single account
+approving its own PR is a topology/config problem, not one portitor papers over with invented
+state. (`comment` is always self-account-safe, so the inline-thread feedback channel works in every
+deployment; only `approve`/`request-changes` require a distinct reviewer account.) `review --event
+approve` additionally auto-resolves the gate's own unresolved threads on that PR — the gate's own
+identified by author (the gate's PAT account), not from any stored record.
+
+The approval verdict therefore lives in a source of truth, never in portitor: on GitHub (a native
+review, read by `merge_gate.review: github`) or in git (a signed commit — e.g. a reviewer-signed
+bead-close — read by a `merge_gate.checks` predicate). A gate-proxy holding the authoritative
+"approved" bit in its own `reviews_log` was a dual-write with no atomicity (a crash between the
+append and the GitHub post, or a lost file, and the only record of approval is gone); it is
+retired (see 2026-08-05-transparent-approve).
 
 ## Merge preconditions (re-derived, never trusted; review source configurable)
 
 `merge` re-derives every precondition from authoritative GitHub state in one query
 (`mergeStateStatus`, `statusCheckRollup`, `headRefName`, plus `reviewDecision` when configured)
-plus the local repo and the gate's own review record, and refuses with the full list of unmet
-conditions:
+plus the local repo, and refuses with the full list of unmet conditions:
 
-- **review** — per the config's `merge_gate.review`:
-  `internal` (the default when the block or field is absent): a `reviews_log` approval exists for
-  the PR's **current** head SHA, from a fingerprint whose role `action_roles` allows to review.
-  Rationale (verified empirically): GitHub sets `reviewDecision` only under required-review
-  branch protection — null otherwise, so a hardcoded APPROVED check can never pass on a solo
-  repo — and the PAT account cannot approve its own PRs at all, so single-account deployments
-  need the gate's own cryptographically-attributed verdict.
-  `github`: the legacy `reviewDecision == "APPROVED"` (multi-account deployments).
-  `none`: no review precondition.
+- **review** — per the config's `merge_gate.review`, one of `github | none` (default `none` when
+  the block or field is absent):
+  `github`: GitHub's native `reviewDecision == "APPROVED"` — separated-account deployments, where
+  GitHub itself enforces required approvals, refuses self-approval, and dismisses stale approvals
+  on push. `none`: no review precondition here; the review gate, if any, is expressed as a
+  `merge_gate.checks` predicate over git content (below). Default `none` because portitor invents
+  no gate: an absent `merge_gate` requires only `CLEAN` + `required_checks`, and a deployment that
+  wants a review precondition declares `github` or a `checks` predicate. (The retired `internal`
+  source recorded a gate-owned verdict to fake native approval inside a single account; that state
+  is gone — single-account deployments express the reviewer's verdict as a signed commit read by a
+  `checks` predicate. See 2026-08-05-transparent-approve.)
 - `mergeStateStatus == CLEAN` — **mandatory and non-configurable**; one field covers
   up-to-date-with-base (`BEHIND`), conflict-free (`DIRTY`), and blocked (`BLOCKED`, which
   inherits every GitHub branch rule including required conversation resolution). Portitor is a
@@ -125,20 +135,28 @@ conditions:
   final two argv elements. Exit 0 = met; nonzero = unmet, named in the refusal; failure to RUN
   is an operational error (fail-closed). This is the seam for repo-policy predicates (e.g. a
   beads-state check) without portitor learning any domain word.
-- **separation of duties** — the requesting key must not have signed any commit the PR
-  introduces. Verified against the *local* gated repo (`rev-list default..head`, `%GF` per
-  commit — the same delegated-to-git verification the gate uses); the same check guards
-  `review --event approve`. This is mostly inherent (roles are distinct keys) — the explicit
-  check guards misconfiguration and an owner acting in multiple roles. A head ref portitor does
-  not have locally is a refusal (fail-closed).
+Separation of duties is **not** a portitor-enforced precondition — the hardcoded rule ("the
+requesting key must not have signed any commit the PR introduces", formerly guarding both
+`review --event approve` and `merge`) is removed. Reviewer-≠-author integrity lives in the source
+of truth instead: GitHub's own branch protection for separated accounts, and, for single-account
+git-content, the push-time `content_rules` that already gate a bead-close to the reviewer key (so a
+closed bead is reviewer-attested by construction). See 2026-08-05-transparent-approve.
 
 **Enforcement is hybrid, and the merge is head-pinned:** portitor re-derives for a clear verdict
 and an actionable error, and the final `gh pr merge --match-head-commit <head>` lands exactly the
-head the preconditions — including the internal review verdict — were evaluated against: GitHub's
-atomic re-check covers only GitHub-enforced rules, so without the pin a push racing the merge
-window could land an unapproved head under a stale internal approval. A moved head fails the
-merge (TOCTOU closed for both rule sources). Operators should additionally enable GitHub branch
+head the preconditions — the git-content predicates in particular — were evaluated against:
+GitHub's atomic re-check covers only GitHub-enforced rules, so without the pin a push racing the
+merge window could land a head a `merge_gate.checks` predicate never evaluated. A moved head fails
+the merge (TOCTOU closed for both rule sources). Operators should additionally enable GitHub branch
 protection (required checks + require-up-to-date) as defense in depth.
+
+The **merge method** is config, not hardcoded: `merge_gate.merge_method` selects `squash`
+(default), `merge`, or `rebase`, mapped to the corresponding `gh pr merge` flag (the head-pin
+applies to all three). The method decides the default branch's landed history — a squash lands one
+GitHub-signed commit and collapses the branch's commits, while `merge`/`rebase` preserve them
+(including any role-key-signed commits) with their signatures. The repo must allow the chosen
+method; GitHub's refusal (e.g. `--merge` with merge commits disabled) is forwarded verbatim. See
+2026-08-05-configurable-merge-method.
 
 ## Audit trail
 

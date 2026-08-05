@@ -433,31 +433,18 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		}
 	case "review":
 		// Reject an unrecognized verdict before anything else in this case — no
-		// reviews_log record, no GitHub post, not even the separation-of-duties/
-		// FetchMergeState calls below. A misspelled --event (e.g. "aprove") must
-		// never silently fall through as if it were a no-op verdict.
+		// GitHub post, no auto-resolve. A misspelled --event (e.g. "aprove")
+		// must never silently fall through as if it were a no-op verdict.
 		switch event {
 		case "approve", "request-changes", "comment":
 		default:
 			return fail(fmt.Errorf("review: --event must be one of approve|request-changes|comment (got %q)", event))
 		}
-		if event == "approve" {
-			// Separation of duties: an approval must not come from a key that
-			// signed the PR's own commits.
-			signed, err := requesterSignedPR(s, repo, fp, prNum, gh)
-			if err != nil {
-				return fail(fmt.Errorf("separation-of-duties check: %w", err))
-			}
-			if signed {
-				return deny(fmt.Sprintf("separation of duties: key %s signed commits this PR introduces; it may not approve", fp))
-			}
-		}
-		st, err := gh.FetchMergeState(prNum)
-		if err != nil {
-			return fail(err)
-		}
-		var body string
-		var threadIDs []string
+		// review is a transparent GitHub passthrough — the caller's real verdict
+		// is submitted, no separation-of-duties check and no gate-owned record
+		// (see spec/proposals/2026-08-05-transparent-approve.md). If GitHub
+		// refuses the event (e.g. HTTP 422 on self-approval), gh.Review/
+		// ReviewInline return the error verbatim and fail loudly here.
 		if o.Inline {
 			raw, rerr := io.ReadAll(in)
 			if rerr != nil {
@@ -467,25 +454,16 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 			if jerr := json.Unmarshal(raw, &sub); jerr != nil {
 				return fail(fmt.Errorf("--inline: stdin is not the {body,comments} JSON document: %w", jerr))
 			}
-			body = sub.Body
-			ids, rerr := gh.ReviewInline(prNum, sub.Body, sub.Comments)
-			if rerr != nil {
+			if _, rerr := gh.ReviewInline(prNum, event, sub.Body, sub.Comments); rerr != nil {
 				return fail(rerr)
 			}
-			threadIDs = ids
 		} else {
-			body = readBody(in)
-			if rerr := gh.Review(prNum, body); rerr != nil {
+			if rerr := gh.Review(prNum, event, readBody(in)); rerr != nil {
 				return fail(rerr)
 			}
-		}
-		if rerr := action.AppendReview(s.ReviewsLog, action.ReviewRecord{
-			PR: prNum, HeadSHA: st.HeadSHA, Fingerprint: fp, Role: role, Event: event, Threads: threadIDs,
-		}); rerr != nil {
-			return fail(fmt.Errorf("reviews_log: %w", rerr))
 		}
 		if event == "approve" {
-			if rerr := resolveGateThreads(gh, s.ReviewsLog, prNum); rerr != nil {
+			if rerr := resolveGateThreads(gh, prNum); rerr != nil {
 				return fail(fmt.Errorf("auto-resolve: %w", rerr))
 			}
 		}
@@ -505,7 +483,7 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 				return fail(err)
 			}
 		case o.GateThreads:
-			if err := resolveGateThreads(gh, s.ReviewsLog, prNum); err != nil {
+			if err := resolveGateThreads(gh, prNum); err != nil {
 				return fail(err)
 			}
 		default:
@@ -517,13 +495,6 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 			return fail(err)
 		}
 		reviewInput := action.ReviewGateInput{Source: s.ReviewSource()}
-		if reviewInput.Source == "" || reviewInput.Source == "internal" {
-			approved, aerr := action.InternalApproval(s.ReviewsLog, prNum, st.HeadSHA, s.ActionRoles)
-			if aerr != nil {
-				return fail(fmt.Errorf("internal review lookup: %w", aerr))
-			}
-			reviewInput.InternalApproved = approved
-		}
 		predicates, perr := runMergeChecks(s, repo, prNum, st.HeadSHA)
 		if perr != nil {
 			return fail(perr)
@@ -531,13 +502,6 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		unmet, uerr := action.UnmetMergePreconditions(st, s.RequiredChecks, reviewInput, predicates)
 		if uerr != nil {
 			return fail(uerr)
-		}
-		signed, err := requesterSignedHead(s, repo, fp, st.HeadRefName)
-		if err != nil {
-			return fail(fmt.Errorf("separation-of-duties check: %w", err))
-		}
-		if signed {
-			unmet = append(unmet, fmt.Sprintf("separation of duties: key %s signed commits this PR introduces", fp))
 		}
 		if len(unmet) > 0 {
 			return deny(fmt.Sprintf("PR #%d does not meet the merge preconditions: %s", prNum, strings.Join(unmet, "; ")))
@@ -547,7 +511,7 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		// against, so a state change (or a new commit) landing since the query
 		// fails there (TOCTOU closed GitHub-side) rather than silently merging a
 		// head the internal review verdict never covered.
-		if err := gh.Merge(prNum, st.HeadSHA); err != nil {
+		if err := gh.Merge(prNum, s.MergeMethod(), st.HeadSHA); err != nil {
 			return fail(err)
 		}
 	case "close":
@@ -559,35 +523,27 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 	return 0
 }
 
-// resolveGateThreads resolves every currently-unresolved review thread that
-// reviews_log records the gate's own reviews as having created on pr — used
-// by `review --event approve`'s auto-resolve and `resolve --gate-threads`.
-// Human-authored threads never appear in reviews_log, so they are never
-// touched here.
-func resolveGateThreads(gh action.GH, reviewsLog string, pr int) error {
-	ids, err := action.GateThreadIDs(reviewsLog, pr)
+// resolveGateThreads resolves every currently-unresolved review thread on pr
+// that the gate's own account authored — used by `review --event approve`'s
+// auto-resolve and `resolve --gate-threads`. With reviews_log retired, gate
+// threads are identified by author (the gate's own authenticated GitHub
+// login, from CurrentLogin), not from any stored record; human-authored
+// threads are never touched here (see action.GateAuthoredThreads).
+func resolveGateThreads(gh action.GH, pr int) error {
+	login, err := gh.CurrentLogin()
 	if err != nil {
 		return err
-	}
-	if len(ids) == 0 {
-		return nil
 	}
 	threads, err := gh.FetchReviewThreads(pr)
 	if err != nil {
 		return err
 	}
-	unresolved := make(map[string]bool, len(threads))
-	for _, th := range threads {
-		if !th.IsResolved {
-			unresolved[th.ID] = true
-		}
-	}
-	for _, id := range ids {
-		if !unresolved[id] {
+	for _, th := range action.GateAuthoredThreads(threads, login) {
+		if th.IsResolved {
 			continue
 		}
-		if err := gh.Resolve(id); err != nil {
-			return fmt.Errorf("resolve thread %s: %w", id, err)
+		if err := gh.Resolve(th.ID); err != nil {
+			return fmt.Errorf("resolve thread %s: %w", th.ID, err)
 		}
 	}
 	return nil
@@ -618,45 +574,6 @@ func runMergeChecks(s config.Settings, repo string, pr int, headSHA string) ([]a
 		results = append(results, res)
 	}
 	return results, nil
-}
-
-// requesterSignedPR resolves the PR's head ref, then defers to
-// requesterSignedHead.
-func requesterSignedPR(s config.Settings, repo, fp string, pr int, gh action.GH) (bool, error) {
-	st, err := gh.FetchMergeState(pr)
-	if err != nil {
-		return false, err
-	}
-	return requesterSignedHead(s, repo, fp, st.HeadRefName)
-}
-
-// requesterSignedHead reports whether the requesting key signed any commit the
-// PR introduces (default..head), verified against the LOCAL gated repo with
-// the gate's own hermetic verification. Fail-closed: a head ref portitor does
-// not have locally, or any verification failure, is an error the caller
-// refuses on.
-func requesterSignedHead(s config.Settings, repo, fp, headRef string) (bool, error) {
-	if headRef == "" {
-		return false, errors.New("PR head ref is empty")
-	}
-	tip := "refs/heads/" + headRef
-	if !gate.ValidRef(tip) {
-		return false, fmt.Errorf("implausible PR head ref %q", headRef)
-	}
-	bare := filepath.Join(config.ReposRoot(), repo+".git")
-	def := s.DefaultBranch
-	if def == "" {
-		d, err := defaultBranchName(bare)
-		if err != nil {
-			return false, err
-		}
-		def = d
-	}
-	fps, err := gate.SignerFingerprints(bare, "refs/heads/"+def, tip, s.AllowedSigners)
-	if err != nil {
-		return false, err
-	}
-	return fps[fp], nil
 }
 
 // readBody reads the action body (comment/review text) from r (stdin), so
