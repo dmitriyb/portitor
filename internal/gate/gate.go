@@ -113,8 +113,12 @@ type Config struct {
 	Content *rules.ContentRules `json:"content_rules"`
 	// RetiredRoleRules is a sentinel for the retired role_rules key: a config
 	// still carrying it refuses to gate with a migration message — the old
-	// rules are never silently dropped.
-	RetiredRoleRules json.RawMessage `json:"role_rules"`
+	// rules are never silently dropped. omitempty so a clean config (no
+	// role_rules) round-trips through marshal→unmarshal without emitting a
+	// spurious "role_rules": null that the decode would then flag as retired;
+	// detection on decode is unaffected (a real role_rules value still lands
+	// here and trips the check).
+	RetiredRoleRules json.RawMessage `json:"role_rules,omitempty"`
 	// RequireUpToDateWithDefault, when true, rejects a feature-branch update whose
 	// tip does not contain the current default-branch tip (i.e. it is based on a
 	// stale default). The deterministic start-task wrapper branches from the current
