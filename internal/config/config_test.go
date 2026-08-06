@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/gate"
@@ -247,6 +248,51 @@ func TestValidate(t *testing.T) {
 	badMethod.MergeGate = &action.MergeGateConfig{MergeMethod: "fast-forward"}
 	if p := Validate(badMethod); len(p) == 0 {
 		t.Fatal("an unknown merge_gate.merge_method value should be invalid")
+	}
+
+	// serve_refresh_timeout: absent is valid (ServeRefreshTimeoutOrDefault
+	// falls back to 30s); a value that fails to parse as a Go duration, or
+	// parses to zero/negative, must be flagged rather than silently
+	// tolerated at serve time (gate/mirror-refresh-on-serve).
+	okTimeout := good
+	okTimeout.ServeRefreshTimeout = "2m"
+	if p := Validate(okTimeout); len(p) != 0 {
+		t.Fatalf("a well-formed serve_refresh_timeout should validate: %v", p)
+	}
+	for _, bad := range []string{"nope", "0s", "-5s"} {
+		badTimeout := good
+		badTimeout.ServeRefreshTimeout = bad
+		if p := Validate(badTimeout); len(p) == 0 {
+			t.Fatalf("serve_refresh_timeout %q should be invalid", bad)
+		}
+	}
+}
+
+// TestServeRefreshTimeoutOrDefault pins the effective-timeout resolution
+// gate/mirror-refresh-on-serve's flock-acquire-plus-fetch bounds itself by:
+// absent, malformed, and non-positive values all fall back to the 30s
+// default (Validate is what surfaces a malformed value to the operator; this
+// accessor's job is only to never let a bad value degrade into an unbounded
+// or zero-length wait at serve time), while a valid duration passes through.
+func TestServeRefreshTimeoutOrDefault(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{"absent", "", ServeRefreshTimeoutDefault},
+		{"malformed", "nope", ServeRefreshTimeoutDefault},
+		{"zero", "0s", ServeRefreshTimeoutDefault},
+		{"negative", "-5s", ServeRefreshTimeoutDefault},
+		{"valid", "2m", 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := Settings{ServeRefreshTimeout: tt.value}
+			if got := s.ServeRefreshTimeoutOrDefault(); got != tt.want {
+				t.Errorf("ServeRefreshTimeoutOrDefault() with %q = %s, want %s", tt.value, got, tt.want)
+			}
+		})
 	}
 }
 

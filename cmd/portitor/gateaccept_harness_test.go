@@ -389,6 +389,17 @@ func (gi *gateInstance) cloneAsRole(t *testing.T, rk roleKey, repo string) strin
 	return dir
 }
 
+// tryCloneAsRole is cloneAsRole without the test-fatal: for callers that must
+// assert BOTH the accept and the reject path of a clone (e.g. an upstream
+// unreachable at serve time must fail the clone loudly, not succeed stale).
+func (gi *gateInstance) tryCloneAsRole(t *testing.T, rk roleKey, repo, dest string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", "clone", "-q", gi.remoteURL(repo), dest)
+	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gi.gitSSHCommand(rk.priv))
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // pushAsRole pushes refspec from dir to the gate as rk (exercising
 // pre/post-receive through git-receive-pack). It does NOT fail the test on a
 // non-zero exit — callers assert both the accept and the reject paths.

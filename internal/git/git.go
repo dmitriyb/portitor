@@ -44,6 +44,16 @@ func OutputNetworkRun(dir string, args ...string) error {
 	return err
 }
 
+// OutputNetworkRunTimeout is OutputNetworkRun with a caller-supplied timeout
+// in place of NetworkTimeout — for a network call that must be bounded by
+// something other than the default 5m (e.g. gate/mirror-refresh-on-serve's
+// serve_refresh_timeout, which bounds a flock-acquire-plus-fetch a clone is
+// waiting on, so it must stay well under NetworkTimeout).
+func OutputNetworkRunTimeout(dir string, timeout time.Duration, args ...string) error {
+	_, err := run(dir, timeout, false, args...)
+	return err
+}
+
 // OutputHermetic is Output with the global and system git config masked
 // (GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM=/dev/null) — for the gate's
 // fact-gathering calls, whose verdict must be a function of the push, the repo,

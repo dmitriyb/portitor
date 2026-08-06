@@ -81,6 +81,19 @@ load (the upgrade-binary-first rule), since portitor no longer keeps a gate-owne
 approval is native GitHub (`review: github`) or a git-content `merge_gate.checks` predicate (see
 2026-08-05-transparent-approve).
 
+## `serve_refresh_timeout`
+
+An optional per-repo field, a Go duration string (e.g. `"30s"`, `"2m"`), defaulting to **30s**
+when absent — kept old configs working without a re-provision. It bounds
+gate/mirror-refresh-on-serve's per-repo flock-acquire-plus-fetch that runs before serving a
+`git-upload-pack` clone/fetch (spec/cli/arch_machine_entrypoints.md, "shell &lt;fingerprint&gt;"):
+the whole wait-for-the-lock-then-fetch-upstream's-default-branch window, after which the
+dispatcher fails the clone loudly rather than serve stale or hang. `Validate` rejects a value that
+fails to parse as a Go duration or is not positive, the same fail-loud discipline as the rest of
+this file. It is a **mechanism** knob (bounds a network wait), not gate policy, so it lives in this
+per-repo config rather than `policy.json` — a repo whose first fetch legitimately runs long (a big
+upstream) can raise it per-repo.
+
 ## Boundaries
 
 Environment overrides remain operational-only (`PORTITOR_UPSTREAM_REMOTE`, `PORTITOR_UPSTREAM_SLUG`,

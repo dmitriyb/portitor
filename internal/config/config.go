@@ -11,11 +11,18 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/gate"
 	"github.com/dmitriyb/portitor/internal/rules"
 )
+
+// ServeRefreshTimeoutDefault is the serve_refresh_timeout bound applied when
+// a repo's config omits the field — long enough for a small repo's fetch,
+// far short of git.NetworkTimeout's 5m so a blip on this path cannot hang a
+// clone for minutes (see ServeRefreshTimeoutOrDefault).
+const ServeRefreshTimeoutDefault = 30 * time.Second
 
 // SupportedFormatVersion is the only config format_version this binary
 // operates with. Missing, lower, or higher refuses at load — never operate
@@ -52,6 +59,29 @@ type Settings struct {
 	// config, not code — portitor ships no role names. Absent = every role
 	// is a signing role.
 	IdentityOnlyRoles []string `json:"identity_only_roles"`
+	// ServeRefreshTimeout bounds gate/mirror-refresh-on-serve's per-repo flock
+	// acquire + fetch before serving a git-upload-pack clone/fetch (a Go
+	// duration string, e.g. "30s", "2m"; see ServeRefreshTimeoutOrDefault for
+	// the empty/absent/malformed default and spec/gate/arch_config.md). A
+	// mechanism knob (bounds a network wait), not gate policy — it does not
+	// belong in policy.json.
+	ServeRefreshTimeout string `json:"serve_refresh_timeout"`
+}
+
+// ServeRefreshTimeoutOrDefault returns the effective serve_refresh_timeout
+// duration: ServeRefreshTimeoutDefault when the field is absent, empty, or
+// fails to parse as a positive Go duration. Validate flags a malformed value
+// so a typo surfaces at validate-config/add-role time rather than silently
+// falling back here at serve time.
+func (s Settings) ServeRefreshTimeoutOrDefault() time.Duration {
+	if s.ServeRefreshTimeout == "" {
+		return ServeRefreshTimeoutDefault
+	}
+	d, err := time.ParseDuration(s.ServeRefreshTimeout)
+	if err != nil || d <= 0 {
+		return ServeRefreshTimeoutDefault
+	}
+	return d
 }
 
 // ReviewSource returns the effective merge_gate.review source (github|none),
@@ -220,6 +250,7 @@ var topLevelKeys = map[string]bool{
 	"audit_log":                       true,
 	"identity_only_roles":             true,
 	"merge_gate":                      true,
+	"serve_refresh_timeout":           true,
 }
 
 // dataMapKeys names the top-level keys whose object values are DATA maps
@@ -371,6 +402,13 @@ func Validate(s Settings) []string {
 					problems = append(problems, fmt.Sprintf("merge_gate.checks[%d] (%q): command[%d] is empty", i, c.Name, j))
 				}
 			}
+		}
+	}
+	if s.ServeRefreshTimeout != "" {
+		if d, err := time.ParseDuration(s.ServeRefreshTimeout); err != nil {
+			problems = append(problems, fmt.Sprintf("serve_refresh_timeout %q is not a valid Go duration: %v", s.ServeRefreshTimeout, err))
+		} else if d <= 0 {
+			problems = append(problems, fmt.Sprintf("serve_refresh_timeout %q must be positive", s.ServeRefreshTimeout))
 		}
 	}
 	_, ruleProblems := rules.Compile(s.Content)
