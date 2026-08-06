@@ -15,7 +15,12 @@
     {
       "type": "functional",
       "title": "Role-gated pr action API (config-driven, default-deny)",
-      "description": "`portitor pr <fetch|comment|review|reply|resolve|merge|close> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|reply|resolve|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+      "description": "`portitor pr <fetch|comment|review|reply|resolve|describe|merge|close> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|reply|resolve|describe|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review/describe text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+    },
+    {
+      "type": "functional",
+      "title": "describe overwrites the PR body (stdin, role-gated)",
+      "description": "`describe --pr N` reads a markdown body from stdin and OVERWRITES the PR's body/description via `gh pr edit --body`, replacing whatever default GitHub (or auto-open) put there. Modeled exactly on `comment` — same stdin-read, same gh-shell structure — differing only in the gh call (`pr edit` vs `pr comment`) and the action_roles key it checks (`action_roles[\"describe\"]`, default-deny like every other verb). Lets an agent set a clean, single PR description (e.g. its own summary) instead of leaving the commit-derived auto-open body plus a redundant summary comment."
     },
     {
       "type": "functional",
@@ -56,7 +61,7 @@
   "components": [
     {
       "name": "ActionClient",
-      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Review, Merge, ClosePR, Fetch, FetchMergeState) pinned to one repo slug via -R, plus the pure precondition evaluator UnmetMergePreconditions; a swappable Runner makes it testable with stubbed gh.",
+      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Describe, Review, Merge, ClosePR, Fetch, FetchMergeState) pinned to one repo slug via -R, plus the pure precondition evaluator UnmetMergePreconditions; a swappable Runner makes it testable with stubbed gh.",
       "content": "arch_action.md",
       "implements": []
     },

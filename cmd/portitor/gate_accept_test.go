@@ -141,6 +141,34 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 	pr := parsePRNumber(t, out)
 	t.Logf("opened PR #%d", pr)
 
+	// ---- step 1b: `pr describe` overwrites the PR body; denied for a role
+	// action_roles["describe"] does not list ----
+	// reviewer is a real, known role in this config — just not one granted
+	// "describe" (scenario3Settings grants it only to implementer) — so this
+	// pins the default-deny gating on the new verb, not a role-lookup miss.
+	newBody := "gateaccept: description set via `portitor pr describe`\n"
+	_, descDenyStderr, err := gi.runPRAs(t, roles["reviewer"], newBody, "describe", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err == nil {
+		t.Fatalf("reviewer should be denied describe (action_roles[\"describe\"] grants only implementer); stderr:\n%s", descDenyStderr)
+	}
+	if !strings.Contains(descDenyStderr, "may not") {
+		t.Errorf("denial should name the role/action; stderr:\n%s", descDenyStderr)
+	}
+	descOut, descStderr, err := gi.runPRAs(t, roles["implementer"], newBody, "describe", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err != nil {
+		t.Fatalf("implementer's describe should be granted: %v\nstdout:\n%s\nstderr:\n%s", err, descOut, descStderr)
+	}
+	var prBody struct {
+		Body string `json:"body"`
+	}
+	bodyBytes := ghAPI(t, "api", fmt.Sprintf("repos/%s/pulls/%d", env.GH.Repo, pr))
+	if err := json.Unmarshal(bodyBytes, &prBody); err != nil {
+		t.Fatalf("parse PR body: %v\nraw: %s", err, bodyBytes)
+	}
+	if strings.TrimSpace(prBody.Body) != strings.TrimSpace(newBody) {
+		t.Fatalf("PR #%d body should be overwritten by describe; got %q, want %q", pr, prBody.Body, newBody)
+	}
+
 	// ---- step 2: merge refused while the bead is open ----
 	waitMergeClean(t, env.GH.Repo, pr) // so the refusal is the bead-closed check, not a transient UNKNOWN merge state
 	_, mergeStderr, err := gi.runPRAs(t, roles["merger"], "", "merge", "--repo", repoName, "--pr", strconv.Itoa(pr))

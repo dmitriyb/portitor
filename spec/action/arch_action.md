@@ -47,7 +47,7 @@ the push.
 
 `portitor pr <action> --pr N` (bodies read from stdin so multi-line markdown survives transport).
 
-**The action verbs are a closed mechanism set** — `fetch | comment | review | reply | resolve | merge | close` —
+**The action verbs are a closed mechanism set** — `fetch | comment | review | reply | resolve | describe | merge | close` —
 but **who may perform each is per-repo config, default-deny**: `action_roles` maps each verb to
 the roles allowed to invoke it, and a verb not listed (or listed with no roles, or an absent
 `action_roles` altogether) is refused for everyone. Every action is privileged, so the default is
@@ -57,19 +57,32 @@ opaque strings, consistent with the rest of the system; `validate-config` reject
 
 ```jsonc
 "action_roles": {
-  "fetch":   ["implementer", "fixer", "reviewer", "merger", "owner"],
-  "comment": ["implementer", "fixer", "reviewer", "merger", "owner"],
-  "review":  ["reviewer", "owner"],
-  "reply":   ["implementer", "fixer", "owner"],
-  "resolve": ["reviewer", "owner"],
-  "merge":   ["merger", "owner"],
-  "close":   ["merger", "owner"]
+  "fetch":    ["implementer", "fixer", "reviewer", "merger", "owner"],
+  "comment":  ["implementer", "fixer", "reviewer", "merger", "owner"],
+  "review":   ["reviewer", "owner"],
+  "reply":    ["implementer", "fixer", "owner"],
+  "resolve":  ["reviewer", "owner"],
+  "describe": ["implementer", "owner"],
+  "merge":    ["merger", "owner"],
+  "close":    ["merger", "owner"]
 }
 ```
 
 The table above is the **recommended** deployment policy (landing authority isolated in a
 dedicated identity, thread resolution isolated in the reviewing identity so a fixer can never
 grade its own answers), not a built-in: portitor ships no role names.
+
+### `describe` overwrites the PR body
+
+`describe --pr N` reads a markdown body from stdin and **overwrites** the PR's body/description
+(`gh pr edit --body`) — modeled exactly on `comment` (same stdin-read, same gh-shell structure),
+differing only in the gh call it makes and the `action_roles` key it checks
+(`action_roles["describe"]`, default-deny like every other verb). It replaces whatever is
+currently there — the commit-derived body auto-open PR set (see below), or a prior `describe` —
+with the caller's text, so an agent can land one clean description instead of the commit-derived
+default plus a redundant summary comment. The author of the work is the natural grantee: the
+recommended policy above grants `describe` to `implementer` (and `owner`), not to `reviewer`/
+`merger` — describing the change is not a review or landing action.
 
 ### Review threads (`fetch` + `reply` + `resolve`)
 

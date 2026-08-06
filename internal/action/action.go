@@ -125,6 +125,25 @@ func (g GH) Comment(pr int, body string) error {
 	return err
 }
 
+// Describe overwrites a PR's body/description. Modeled exactly on Comment —
+// same shape, same stdin-sourced body — differing only in the gh call: `pr
+// edit --body` replaces the description outright (there is no "append" for a
+// PR body the way there is for comments), so a caller's summary becomes the
+// PR's one clean description instead of living alongside the commit-derived
+// auto-open default. An empty/whitespace-only body is refused before gh is
+// ever shelled — unlike Comment (where an empty comment is merely pointless),
+// an empty --body here would silently BLANK the PR's description, destroying
+// whatever was there (the auto-open default or a prior describe); the guard
+// lives in Describe itself so every caller is protected, not just prRun's
+// stdin-reading path.
+func (g GH) Describe(pr int, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("describe: refusing to overwrite the PR body with empty content")
+	}
+	_, err := g.run("pr", "edit", strconv.Itoa(pr), "--body", body)
+	return err
+}
+
 // reviewFlag maps the caller's verdict to the gh CLI review flag. review is a
 // transparent GitHub passthrough (see 2026-08-05-transparent-approve): the
 // caller's real verdict is submitted, not a forced COMMENT.
