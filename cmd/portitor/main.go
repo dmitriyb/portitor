@@ -610,6 +610,17 @@ func shellCommand(args []string) int {
 			fmt.Fprintln(os.Stderr, "portitor: repository not allowed")
 			return 1
 		}
+		if rest[0] == "git-upload-pack" {
+			// Serving a clone/fetch: force-update the mirror's default branch
+			// from upstream first (flock-serialized, bounded by
+			// serve_refresh_timeout — see refreshDefaultBranch), so a served
+			// clone reflects merges (which land on GitHub via `pr merge`, not on
+			// the mirror). Fail loud — never serve a stale default branch.
+			if err := refreshDefaultBranch(rest[1]); err != nil {
+				fmt.Fprintf(os.Stderr, "portitor: refresh %s before serve: %v\n", rest[1], err)
+				return 1
+			}
+		}
 		cmd := exec.Command(rest[0], rest[1])
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		// The hooks inherit the caller's key fingerprint so the audit trail

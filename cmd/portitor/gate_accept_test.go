@@ -44,6 +44,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/dmitriyb/portitor/internal/config"
+	"github.com/dmitriyb/portitor/internal/gate"
 )
 
 // setupGateAccept is every scenario's shared gate: the realgh config/PAT
@@ -186,6 +189,114 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 	}
 	if !prState.Merged || prState.State != "closed" {
 		t.Fatalf("PR #%d should be merged on GitHub; state=%q merged=%v", pr, prState.State, prState.Merged)
+	}
+}
+
+// ---- mirror refresh on serve (gate/mirror-refresh-on-serve) ----
+
+// mirrorRefreshSettings is the minimal config this scenario needs: one role,
+// no merge_gate/content_rules, no explicit serve_refresh_timeout (the 30s
+// default applies) — the behavior under test (force-updating the mirror's
+// default branch before serving git-upload-pack) runs in the SSH shell
+// dispatcher itself, ahead of any push-time or merge-time machinery.
+func mirrorRefreshSettings(roles map[string]roleKey, allowedSignersPath string) config.Settings {
+	rolesMap := make(map[string]string, len(roles))
+	for _, rk := range roles {
+		rolesMap[rk.fingerprint] = rk.role
+	}
+	return config.Settings{
+		FormatVersion: config.SupportedFormatVersion,
+		Config: gate.Config{
+			DefaultBranch:  "main",
+			AllowedSigners: allowedSignersPath,
+			Roles:          rolesMap,
+		},
+	}
+}
+
+// TestGateAccept_MirrorRefreshOnServe pins the fix for the frozen-mirror bug
+// (spec/cli/arch_machine_entrypoints.md "shell <fingerprint>" / the `git`
+// route's git-upload-pack handling): the gate's bare mirror used to write
+// refs/heads/<default> once, at add-repo time, and never again — a `pr merge`
+// lands on GitHub only, so a box cloning the mirror saw a frozen default
+// branch forever. Now the dispatcher force-updates the mirror's default
+// branch from upstream (flock-serialized, bounded by serve_refresh_timeout)
+// before serving every git-upload-pack (clone/fetch).
+//
+// Flow:
+//  1. a clone through the gate shows the seed `main`.
+//  2. upstream `main` advances via a plain PAT-authenticated push directly to
+//     GitHub (not a PR merge, not `add-repo`/reset) — standing in for a
+//     landed merge, which likewise never touches the mirror directly.
+//  3. a FRESH clone through the gate now carries upstream's new tip — the
+//     mirror advanced on its own before serving.
+//  4. negative: with the mirror's upstream remote pointed at an unreachable
+//     URL, the clone fails loudly (non-zero + portitor's wrapped diagnostic
+//     on stderr), never silently serving the stale mirror.
+func TestGateAccept_MirrorRefreshOnServe(t *testing.T) {
+	env := setupGateAccept(t)
+	resetDisposableRepo(t, env)
+
+	tmp := t.TempDir()
+	roles := genRoleKeys(t, filepath.Join(tmp, "keys"), "reader")
+
+	cfgDir := filepath.Join(tmp, "portitor-config")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "repos.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAllowedSigners(t, filepath.Join(cfgDir, "allowed_signers"), roles["reader"])
+
+	const repoName = "gateaccept-mirror-refresh"
+	settings := mirrorRefreshSettings(roles, "/etc/portitor/allowed_signers")
+	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
+	chmodTreeReadable(t, cfgDir)
+
+	gi := standUpGate(t, cfgDir, roles, env.PAT)
+	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
+
+	// ---- step 1: a clone through the gate shows the seed state ----
+	dir1 := gi.cloneAsRole(t, roles["reader"], repoName)
+	seed, err := os.ReadFile(filepath.Join(dir1, probeFile))
+	if err != nil {
+		t.Fatalf("seed clone missing %s: %v", probeFile, err)
+	}
+	if strings.TrimSpace(string(seed)) != "gateaccept seed" {
+		t.Fatalf("seed clone: %s = %q, want the seed content", probeFile, seed)
+	}
+
+	// ---- step 2: advance upstream main directly, bypassing the gate (a
+	// stand-in for a landed merge — pr merge is a pure gh API call that lands
+	// on GitHub only, never touching the mirror either) ----
+	const advancedFile = "gateaccept-mirror-refresh-probe.txt"
+	upDir := cloneRepo(t, env)
+	if err := os.WriteFile(filepath.Join(upDir, advancedFile), []byte("advanced upstream directly\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, upDir, "add", "-A")
+	runGit(t, upDir, "commit", "-q", "-m", "gateaccept: advance upstream main directly")
+	runGit(t, upDir, "push", "-q", "origin", "main")
+	wantSHA := strings.TrimSpace(runGit(t, upDir, "rev-parse", "HEAD"))
+
+	// ---- step 3: a FRESH clone through the gate reflects the advance ----
+	dir2 := gi.cloneAsRole(t, roles["reader"], repoName)
+	if _, err := os.Stat(filepath.Join(dir2, advancedFile)); err != nil {
+		t.Fatalf("clone after upstream advanced should carry %s (the mirror should have force-updated before serving): %v", advancedFile, err)
+	}
+	gotSHA := strings.TrimSpace(runGit(t, dir2, "rev-parse", "HEAD"))
+	if gotSHA != wantSHA {
+		t.Fatalf("clone after upstream advanced: HEAD = %s, want upstream's new tip %s (mirror did not advance)", gotSHA, wantSHA)
+	}
+
+	// ---- negative: upstream unreachable -> the clone fails loudly ----
+	runDocker(t, "exec", "-u", "git", gi.name, "git", "-C", "/srv/git/"+repoName+".git",
+		"remote", "set-url", "upstream", "https://github.com/portitor-gateaccept-nonexistent/does-not-exist.git")
+	dest := filepath.Join(t.TempDir(), "clone")
+	out, err := gi.tryCloneAsRole(t, roles["reader"], repoName, dest)
+	if err == nil {
+		t.Fatalf("clone with an unreachable upstream should fail loudly, not serve stale:\n%s", out)
+	}
+	if !strings.Contains(out, "portitor:") {
+		t.Errorf("clone failure should surface portitor's wrapped diagnostic; output:\n%s", out)
 	}
 }
 
