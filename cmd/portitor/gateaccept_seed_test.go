@@ -287,11 +287,12 @@ func scenario3Settings(roles map[string]roleKey, upstreamSlug, allowedSignersPat
 		},
 		UpstreamSlug: upstreamSlug,
 		ActionRoles: map[string][]string{
-			"fetch":   {"implementer", "reviewer", "merger"},
-			"comment": {"implementer", "reviewer", "merger"},
-			"review":  {"reviewer"},
-			"merge":   {"merger"},
-			"close":   {"merger"},
+			"fetch":    {"implementer", "reviewer", "merger"},
+			"comment":  {"implementer", "reviewer", "merger"},
+			"review":   {"reviewer"},
+			"describe": {"implementer"},
+			"merge":    {"merger"},
+			"close":    {"merger"},
 		},
 		MergeGate: &action.MergeGateConfig{
 			Review: "none",

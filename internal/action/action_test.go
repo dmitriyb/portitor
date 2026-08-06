@@ -46,6 +46,69 @@ func TestOpenPRNumberIdempotency(t *testing.T) {
 	}
 }
 
+// TestDescribe pins that Describe overwrites the PR body via `gh pr edit
+// --body` (not `pr comment`) — the one difference from Comment's shape (see
+// action.go's Describe doc comment). A body containing multi-line markdown
+// must reach gh as a single --body argument, unmangled.
+func TestDescribe(t *testing.T) {
+	run, last := stub("", nil)
+	body := "## Summary\n\nThis PR does the thing.\n"
+	if err := (GH{Repo: "o/r", Run: run}).Describe(42, body); err != nil {
+		t.Fatal(err)
+	}
+	got := *last
+	if len(got) < 2 || got[0] != "pr" || got[1] != "edit" {
+		t.Fatalf("args = %v, want to start with [pr edit]", got)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"pr edit 42", "-R o/r"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args %v missing %q", got, want)
+		}
+	}
+	// The body must be a single argv element, not shell-split or truncated at
+	// the first newline — `pr comment` uses this same --body shape (never
+	// --body-file), so Describe must match it exactly.
+	foundBody := false
+	for i, a := range got {
+		if a == "--body" && i+1 < len(got) && got[i+1] == body {
+			foundBody = true
+		}
+	}
+	if !foundBody {
+		t.Fatalf("args %v: --body argument does not carry the exact multi-line body %q", got, body)
+	}
+	// Describe must never shell to `pr comment` — a copy-paste from Comment
+	// that forgot to change the subcommand would silently post a comment
+	// instead of overwriting the body.
+	if strings.Contains(joined, "comment") {
+		t.Fatalf("args %v must not invoke `pr comment`", got)
+	}
+}
+
+// TestDescribeRefusesEmptyBody pins that Describe refuses an empty or
+// whitespace-only body BEFORE shelling gh — an empty `--body` would silently
+// BLANK the PR's description (destroying the auto-open default or a prior
+// describe), unlike Comment where an empty comment is merely pointless. The
+// runner must never be invoked for either case.
+func TestDescribeRefusesEmptyBody(t *testing.T) {
+	for _, body := range []string{"", "   ", "\n\t \n"} {
+		t.Run(fmt.Sprintf("%q", body), func(t *testing.T) {
+			run, last := stub("", nil)
+			err := (GH{Repo: "o/r", Run: run}).Describe(42, body)
+			if err == nil {
+				t.Fatal("empty/whitespace body must error")
+			}
+			if !strings.Contains(err.Error(), "empty") {
+				t.Fatalf("error should explain the refusal, got %q", err)
+			}
+			if *last != nil {
+				t.Fatalf("gh must not be called for an empty body, got args %v", *last)
+			}
+		})
+	}
+}
+
 // TestReviewSubmitsRealEvent pins the transparent-passthrough behavior
 // (2026-08-05-transparent-approve): GH.Review submits the caller's REAL
 // GitHub review event — approve/request-changes/comment — never a forced

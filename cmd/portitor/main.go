@@ -365,7 +365,7 @@ type prOptions struct {
 
 func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(errw, "portitor pr: action required (fetch|comment|review|reply|resolve|merge|close)")
+		fmt.Fprintln(errw, "portitor pr: action required (fetch|comment|review|reply|resolve|describe|merge|close)")
 		return 2
 	}
 	act := args[0]
@@ -429,6 +429,10 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		fmt.Fprint(out, res)
 	case "comment":
 		if err := gh.Comment(prNum, readBody(in)); err != nil {
+			return fail(err)
+		}
+	case "describe":
+		if err := gh.Describe(prNum, readBody(in)); err != nil {
 			return fail(err)
 		}
 	case "review":
@@ -518,6 +522,13 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		if err := gh.ClosePR(prNum); err != nil {
 			return fail(err)
 		}
+	default:
+		// Unreachable for any verb in action.Verbs today (every one of them has
+		// a case above) — this is a deliberate fail-loud backstop: a future
+		// verb added to the closed set (and granted in some deployment's
+		// action_roles) but never wired up here must error, not fall through
+		// this switch as a silent no-op that still reports "allow" below.
+		return fail(fmt.Errorf("unhandled action %q", act))
 	}
 	auditDecision("allow", "")
 	return 0

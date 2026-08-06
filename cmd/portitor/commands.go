@@ -277,7 +277,7 @@ func newPrCmd(actorFingerprint func() string) *cobra.Command {
 	var event, repo, thread string
 	var inline, gateThreads bool
 	cmd := &cobra.Command{
-		Use:     "pr <fetch|comment|review|reply|resolve|merge|close>",
+		Use:     "pr <fetch|comment|review|reply|resolve|describe|merge|close>",
 		Short:   "Run one role-validated GitHub action",
 		GroupID: cli.GroupAction,
 		Args:    cobra.ArbitraryArgs,

@@ -115,6 +115,144 @@ func TestReviewRejectsUnknownEvent(t *testing.T) {
 	}
 }
 
+// TestDescribeDeniedWithoutRole pins that prRun's "describe" verb is a known,
+// gate-checkable action — reaching the role.RoleCan default-deny branch (not
+// the earlier "unknown action" usage error) — and is refused for a caller
+// whose role is absent from action_roles["describe"]. If `describe` were
+// missing from action.Verbs (the closed mechanism set), prRun would reject it
+// at the args check with "unknown action" instead, before ever consulting
+// action_roles; if the switch's "describe" case were removed but the verb
+// left in Verbs/action_roles, this test would still pass (it never reaches
+// the switch), which is exactly why TestDescribeGrantedRoleReachesGH below
+// covers the granted path separately.
+func TestDescribeDeniedWithoutRole(t *testing.T) {
+	reposDir := t.TempDir()
+	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+
+	fp := "SHA256:" + strings.Repeat("a", 43)
+	// action_roles grants "describe" to nobody at all (absent key ==
+	// default-deny) — "reviewer" is a real, known role, just not one this
+	// policy lists under "describe".
+	cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+		`"roles":{"` + fp + `":"reviewer"},"action_roles":{"comment":["reviewer"]},` +
+		`"upstream_slug":"acme/repo"}`
+	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errw bytes.Buffer
+	rc := prRun(fp, []string{"describe"}, prOptions{PR: 1, Repo: "myrepo"},
+		strings.NewReader("new description"), &out, &errw)
+	if rc == 0 {
+		t.Fatalf("describe should be denied when action_roles[\"describe\"] does not list the caller's role, got rc=0")
+	}
+	if !strings.Contains(errw.String(), `may not "describe"`) {
+		t.Fatalf("expected the role-based default-deny message naming \"describe\", got %q", errw.String())
+	}
+	if strings.Contains(errw.String(), "unknown action") {
+		t.Fatalf("describe must be a known verb (dispatched to RoleCan, not rejected as unrecognized), got %q", errw.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a denied describe must never write a gh response to stdout, got %q", out.String())
+	}
+}
+
+// TestDescribeGrantedRoleReachesGH pins that a role GRANTED action_roles
+// ["describe"] clears the RoleCan gate and reaches the gh dispatch — proven
+// without any git/gh call by setting upstream_slug to a deliberately
+// malformed value ("noSlash", no "/"). ghClientFor only falls back to
+// deriving a slug from the git remote when upstream_slug is EMPTY (see
+// main.go's ghClientFor) — an explicit-but-malformed value skips remote
+// derivation entirely and fails validSlug, so gh.Repo == "" and prRun refuses
+// with "no upstream slug configured" immediately before the switch, with no
+// git subprocess run at all (this package's tests must never shell to the
+// real git/gh — this test's own working tree has a real "origin" remote, and
+// deriving from it would be exactly the unsafe network call to avoid). A
+// denial here (the "may not" message) would mean describe was not actually
+// granted; an "unknown action" here would mean describe is missing from the
+// closed verb set — this test rules out both, isolating the remaining gap
+// (the switch case itself, exercised in the acceptance tier where gh is
+// real).
+func TestDescribeGrantedRoleReachesGH(t *testing.T) {
+	reposDir := t.TempDir()
+	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+
+	fp := "SHA256:" + strings.Repeat("b", 43)
+	cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+		`"roles":{"` + fp + `":"implementer"},"action_roles":{"describe":["implementer"]},` +
+		`"upstream_slug":"noSlash"}`
+	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errw bytes.Buffer
+	rc := prRun(fp, []string{"describe"}, prOptions{PR: 1, Repo: "myrepo"},
+		strings.NewReader("new description"), &out, &errw)
+	if rc == 0 {
+		t.Fatalf("expected a failure past the role check (no upstream slug configured), got rc=0")
+	}
+	if strings.Contains(errw.String(), "may not") {
+		t.Fatalf("a granted role must not be denied by RoleCan, got %q", errw.String())
+	}
+	if strings.Contains(errw.String(), "unknown action") {
+		t.Fatalf("describe must be a known verb, got %q", errw.String())
+	}
+	if !strings.Contains(errw.String(), "no upstream slug configured") {
+		t.Fatalf("expected the granted role to reach the upstream-slug check, got %q", errw.String())
+	}
+}
+
+// TestDescribeCaseDispatchesToGH pins that prRun's switch actually HAS a
+// "describe" case that calls through to gh.Describe — the one thing
+// TestDescribeGrantedRoleReachesGH above cannot prove (it deliberately stops
+// one step short of the switch, at the upstream-slug check, to avoid a real
+// gh subprocess). This test reaches INSIDE the case without ever shelling gh,
+// by combining a validly-shaped-but-fake upstream_slug (so gh.Repo is
+// non-empty and prRun proceeds past the slug check into the switch, like
+// TestReviewRejectsUnknownEvent's "acme/repo") with an EMPTY stdin body: with
+// action.GH.Describe's empty-body guard (it refuses "" before running gh —
+// see TestDescribeRefusesEmptyBody in internal/action), the case is entered,
+// readBody(in) is called, Describe is invoked, and it fails INSIDE Describe
+// before any subprocess runs — all observable, all hermetic.
+//
+// This also exercises prRun's outer-switch `default:` backstop by contrast:
+// if the "describe" case were removed (while "describe" stayed in
+// action.Verbs and action_roles), execution would fall to `default: return
+// fail(fmt.Errorf("unhandled action %q", act))` instead, and the assertion
+// below (which requires the Describe-specific "refusing to overwrite"
+// message, not "unhandled action") would fail — so this test catches a
+// dropped "describe" case exactly as TestReviewRejectsUnknownEvent already
+// catches a dropped "review" case (its "review:" event-validation message is
+// equally distinct from "unhandled action").
+func TestDescribeCaseDispatchesToGH(t *testing.T) {
+	reposDir := t.TempDir()
+	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+
+	fp := "SHA256:" + strings.Repeat("c", 43)
+	// upstream_slug is validly shaped (owner/name) but points nowhere real —
+	// gh is never actually invoked, because the empty body is refused inside
+	// Describe before g.run (and thus any subprocess) is reached.
+	cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+		`"roles":{"` + fp + `":"implementer"},"action_roles":{"describe":["implementer"]},` +
+		`"upstream_slug":"acme/repo"}`
+	if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errw bytes.Buffer
+	rc := prRun(fp, []string{"describe"}, prOptions{PR: 1, Repo: "myrepo"},
+		strings.NewReader(""), &out, &errw)
+	if rc == 0 {
+		t.Fatalf("an empty describe body should be refused, got rc=0")
+	}
+	if !strings.Contains(errw.String(), "describe: refusing to overwrite the PR body with empty content") {
+		t.Fatalf("expected Describe's empty-body refusal to surface verbatim, got %q", errw.String())
+	}
+	if strings.Contains(errw.String(), "unhandled action") {
+		t.Fatalf("the \"describe\" case must be present in prRun's switch, got %q", errw.String())
+	}
+}
+
 func TestParseUpdates(t *testing.T) {
 	sha := "0123456789abcdef0123456789abcdef01234567"
 	zero := strings.Repeat("0", 40)
@@ -182,11 +320,12 @@ func TestClassify(t *testing.T) {
 
 func TestRoleCan(t *testing.T) {
 	policy := map[string][]string{
-		"comment": {"implementer", "fixer", "reviewer", "merger", "owner"},
-		"fetch":   {"implementer", "fixer", "reviewer", "merger", "owner"},
-		"review":  {"reviewer", "owner"},
-		"merge":   {"merger", "owner"},
-		"close":   {"merger", "owner"},
+		"comment":  {"implementer", "fixer", "reviewer", "merger", "owner"},
+		"fetch":    {"implementer", "fixer", "reviewer", "merger", "owner"},
+		"review":   {"reviewer", "owner"},
+		"describe": {"implementer", "owner"},
+		"merge":    {"merger", "owner"},
+		"close":    {"merger", "owner"},
 	}
 	allRoles := []string{"implementer", "fixer", "reviewer", "merger", "owner", "", "bogus"}
 	for act, allowed := range policy {
