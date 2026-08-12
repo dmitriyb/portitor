@@ -54,6 +54,12 @@ type Settings struct {
 	// command predicates. The retired "internal" source and its reviews_log
 	// key are gone: strict decode rejects a config still carrying either.
 	MergeGate *action.MergeGateConfig `json:"merge_gate"`
+	// Checks configures the Actions-proxy verbs (checks/rerun/logs): per-
+	// check-name stuck budgets, the gate-enforced re-run attempt cap and
+	// all-failed switch, and the gate-side log tail cap (spec/proposals/
+	// 2026-08-12-actions-proxy.md). Absent block = the documented defaults
+	// (action.ChecksConfig's nil-safe accessors).
+	Checks *action.ChecksConfig `json:"checks"`
 	// IdentityOnlyRoles lists the roles whose keys must never gain
 	// commit-signing trust (landing-only identities). Classification is
 	// config, not code — portitor ships no role names. Absent = every role
@@ -250,6 +256,7 @@ var topLevelKeys = map[string]bool{
 	"audit_log":                       true,
 	"identity_only_roles":             true,
 	"merge_gate":                      true,
+	"checks":                          true,
 	"serve_refresh_timeout":           true,
 }
 
@@ -402,6 +409,38 @@ func Validate(s Settings) []string {
 					problems = append(problems, fmt.Sprintf("merge_gate.checks[%d] (%q): command[%d] is empty", i, c.Name, j))
 				}
 			}
+		}
+	}
+	if s.Checks != nil {
+		seenBudget := map[string]bool{}
+		for i, b := range s.Checks.Budgets {
+			if b.Name == "" {
+				problems = append(problems, fmt.Sprintf("checks.budgets[%d]: name is empty", i))
+			} else if seenBudget[b.Name] {
+				// A duplicate name would be silently shadowed by first-match-wins
+				// resolution (action.ChecksConfig.BudgetFor) — the same silent-
+				// shadow class the raw-key discipline refuses elsewhere.
+				problems = append(problems, fmt.Sprintf("checks.budgets[%d]: duplicate name %q (first match wins; the later entry is dead)", i, b.Name))
+			}
+			seenBudget[b.Name] = true
+			if d, err := time.ParseDuration(b.Budget); err != nil {
+				problems = append(problems, fmt.Sprintf("checks.budgets[%d] (%q): budget %q is not a valid Go duration: %v", i, b.Name, b.Budget, err))
+			} else if d <= 0 {
+				problems = append(problems, fmt.Sprintf("checks.budgets[%d] (%q): budget %q must be positive", i, b.Name, b.Budget))
+			}
+		}
+		if s.Checks.DefaultBudget != "" {
+			if d, err := time.ParseDuration(s.Checks.DefaultBudget); err != nil {
+				problems = append(problems, fmt.Sprintf("checks.default_budget %q is not a valid Go duration: %v", s.Checks.DefaultBudget, err))
+			} else if d <= 0 {
+				problems = append(problems, fmt.Sprintf("checks.default_budget %q must be positive", s.Checks.DefaultBudget))
+			}
+		}
+		if s.Checks.MaxAttempts < 0 {
+			problems = append(problems, fmt.Sprintf("checks.max_attempts must not be negative, got %d", s.Checks.MaxAttempts))
+		}
+		if s.Checks.LogTailBytes < 0 {
+			problems = append(problems, fmt.Sprintf("checks.log_tail_bytes must not be negative, got %d", s.Checks.LogTailBytes))
 		}
 	}
 	if s.ServeRefreshTimeout != "" {

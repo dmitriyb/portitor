@@ -75,7 +75,10 @@ role values, `action_roles` verbs from the closed set, `content_rules` compiling
 committer-email rule compares against it byte-exact), `merge_gate.review` from
 `github|none` (default `none`) with every `merge_gate.checks` entry carrying a name and a
 non-empty argv, and `merge_gate.merge_method` from `squash|merge|rebase` (default `squash`;
-see 2026-08-05-configurable-merge-method). The retired `internal` review source and its `reviews_log` key are rejected by
+see 2026-08-05-configurable-merge-method), and the `checks` block (the Actions-proxy policy, see
+2026-08-12-actions-proxy) carrying `budgets` entries with non-empty, unique names and valid
+positive Go-duration budgets, a valid positive `default_budget` when set, and non-negative
+`max_attempts`/`log_tail_bytes`. The retired `internal` review source and its `reviews_log` key are rejected by
 strict decode: a config still carrying `review: "internal"` or a `reviews_log` field fails to
 load (the upgrade-binary-first rule), since portitor no longer keeps a gate-owned verdict —
 approval is native GitHub (`review: github`) or a git-content `merge_gate.checks` predicate (see

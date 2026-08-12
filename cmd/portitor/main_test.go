@@ -253,6 +253,69 @@ func TestDescribeCaseDispatchesToGH(t *testing.T) {
 	}
 }
 
+// TestActionsVerbsRoleGated pins the prRun wiring of the three Actions-proxy
+// verbs (checks|rerun|logs, 2026-08-12-actions-proxy) at the two seams the
+// unit tier can reach hermetically, mirroring the describe tests above:
+// (1) denied for a role absent from action_roles[<verb>] — reaching RoleCan's
+// default-deny, NOT the "unknown action" usage error, which proves each verb
+// is in the closed set; (2) a GRANTED role clears RoleCan and reaches the
+// upstream-slug check (upstream_slug deliberately malformed, "noSlash", so
+// prRun refuses with "no upstream slug configured" BEFORE the switch — no
+// git/gh subprocess ever runs; see TestDescribeGrantedRoleReachesGH's comment
+// for why this stops one step short of the switch). The switch cases
+// themselves are exercised in the acceptance tier, where gh is real.
+func TestActionsVerbsRoleGated(t *testing.T) {
+	for _, verb := range []string{"checks", "rerun", "logs"} {
+		t.Run(verb+" denied without role", func(t *testing.T) {
+			reposDir := t.TempDir()
+			t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+			fp := "SHA256:" + strings.Repeat("d", 43)
+			// "reviewer" is a real, known role — just not granted this verb
+			// (action_roles lists it only under "comment"), so the denial pins
+			// default-deny on the verb, not a role-lookup miss.
+			cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+				`"roles":{"` + fp + `":"reviewer"},"action_roles":{"comment":["reviewer"]},` +
+				`"upstream_slug":"acme/repo"}`
+			if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errw bytes.Buffer
+			rc := prRun(fp, []string{verb}, prOptions{PR: 1, Repo: "myrepo"}, strings.NewReader(""), &out, &errw)
+			if rc == 0 {
+				t.Fatalf("%s should be denied when action_roles[%q] does not list the caller's role", verb, verb)
+			}
+			if !strings.Contains(errw.String(), `may not "`+verb+`"`) {
+				t.Fatalf("expected the role-based default-deny message naming %q, got %q", verb, errw.String())
+			}
+			if strings.Contains(errw.String(), "unknown action") {
+				t.Fatalf("%s must be a known verb (dispatched to RoleCan, not rejected as unrecognized), got %q", verb, errw.String())
+			}
+		})
+		t.Run(verb+" granted role reaches dispatch", func(t *testing.T) {
+			reposDir := t.TempDir()
+			t.Setenv("PORTITOR_REPOS_DIR", reposDir)
+			fp := "SHA256:" + strings.Repeat("e", 43)
+			cfg := `{"format_version":1,"default_branch":"main","allowed_signers":"",` +
+				`"roles":{"` + fp + `":"merger"},"action_roles":{"` + verb + `":["merger"]},` +
+				`"upstream_slug":"noSlash"}`
+			if err := os.WriteFile(filepath.Join(reposDir, "myrepo.json"), []byte(cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var out, errw bytes.Buffer
+			rc := prRun(fp, []string{verb}, prOptions{PR: 1, Repo: "myrepo"}, strings.NewReader(""), &out, &errw)
+			if rc == 0 {
+				t.Fatalf("expected a failure past the role check (no upstream slug configured), got rc=0")
+			}
+			if strings.Contains(errw.String(), "may not") {
+				t.Fatalf("a granted role must not be denied by RoleCan, got %q", errw.String())
+			}
+			if !strings.Contains(errw.String(), "no upstream slug configured") {
+				t.Fatalf("expected the granted role to reach the upstream-slug check, got %q", errw.String())
+			}
+		})
+	}
+}
+
 func TestParseUpdates(t *testing.T) {
 	sha := "0123456789abcdef0123456789abcdef01234567"
 	zero := strings.Repeat("0", 40)

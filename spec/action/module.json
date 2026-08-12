@@ -15,7 +15,7 @@
     {
       "type": "functional",
       "title": "Role-gated pr action API (config-driven, default-deny)",
-      "description": "`portitor pr <fetch|comment|review|reply|resolve|describe|merge|close> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|reply|resolve|describe|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review/describe text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
+      "description": "`portitor pr <fetch|comment|review|reply|resolve|describe|checks|rerun|logs|merge|close> --pr N` performs one action with the upstream credential after checking the caller's role against the per-repo config: action_roles maps each verb of the closed mechanism set (fetch|comment|review|reply|resolve|describe|checks|rerun|logs|merge|close) to the roles allowed to invoke it, and an action not listed for a role is refused — default-deny, since every action is privileged. Role names are free-form opaque strings (no built-in role set); validate-config rejects unknown verbs in action_roles. Bodies (comment/review/describe text) are read from stdin so multi-line markdown survives transport. fetch returns PR review state JSON (the read-side that feeds review/fix bundles)."
     },
     {
       "type": "functional",
@@ -54,6 +54,11 @@
     },
     {
       "type": "functional",
+      "title": "Actions proxy: checks, rerun, logs (gate-resolved, never caller-named)",
+      "description": "Three closed-set verbs proxy the GitHub Actions API (see 2026-08-12-actions-proxy), all action_roles-gated default-deny. No verb accepts a run id, job id, or workflow name — the gate resolves the workflow run(s) from the PR's head SHA (a caller-supplied run id could re-run a release workflow outside the review path); workflow_dispatch is permanently excluded. `checks --pr N` returns one JSON response: per check name/status/conclusion/startedAt/completedAt/workflowName, the owning run id + job id (parsed gate-side from detailsUrl), the run's run_attempt (from the run object — statusCheckRollup lacks it; stateless callers must read attempt state from GitHub, not hold a counter), the check's resolved budget in seconds (checks.budgets per name, else default_budget — data for client-side stuck detection, never a gate policy), plus mergeStateStatus and headRefOid. `rerun --pr N` cancels an in-flight run and waits, then re-runs failed/cancelled jobs (run-level: GitHub has no per-job cancel; green jobs are not re-run); it refuses — distinct, audited messages — on a stale run head (no longer the re-derived PR head), at the checks.max_attempts cap, on an all-jobs-FAILURE run unless checks.allow_rerun_failed, and when every run is green (nothing to re-run); on success it returns the new attempt number per run. `logs --pr N` returns failed jobs' logs only, each tailed and byte-capped gate-side at checks.log_tail_bytes — a caller can never obtain more than the cap; portitor returns bytes and never parses or classifies them. The checks config block (budgets[] {name,budget} + default_budget, max_attempts default 3, allow_rerun_failed default false, log_tail_bytes default 65536) is validated like merge_gate; the enforcement (attempt cap, all-failed switch, log cap, head match) lives in the gate because box-side limits are advisory and the gate cannot distinguish callers."
+    },
+    {
+      "type": "functional",
       "title": "Review threads: fetch exposure, reply, resolve",
       "description": "fetch includes reviewThreads (id, isResolved, path, line, comment chain) via one GraphQL query. New closed-set verbs: reply --pr N --thread <id> (body on stdin; addPullRequestReviewThreadReply) and resolve --pr N --thread <id> | --gate-threads (resolveReviewThread; --gate-threads resolves only threads the gate's own reviews created — human threads are never auto-resolved). Both verbs are action_roles-gated, default-deny."
     }
@@ -61,7 +66,7 @@
   "components": [
     {
       "name": "ActionClient",
-      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Describe, Review, Merge, ClosePR, Fetch, FetchMergeState) pinned to one repo slug via -R, plus the pure precondition evaluator UnmetMergePreconditions; a swappable Runner makes it testable with stubbed gh.",
+      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Describe, Review, Merge, ClosePR, Fetch, FetchMergeState, Checks, FetchRunState, ExecuteRerun, FailedJobLogs) pinned to one repo slug via -R (or the REST path/GraphQL variables for gh api calls), plus the pure evaluators UnmetMergePreconditions, BuildChecksReport, and PlanRerun; a swappable Runner makes it testable with stubbed gh.",
       "content": "arch_action.md",
       "implements": []
     },
@@ -73,7 +78,7 @@
     },
     {
       "name": "PrCommand",
-      "description": "`portitor pr` handler: parses the action + --pr/--event, checks action.RoleCan against the config's action_roles (default-deny), reads the body from stdin, and dispatches to ActionClient; merge re-derives the full precondition set (the configured review source, CLEAN merge state, required checks, and merge_gate.checks git-content predicates); review submits the caller's real GitHub event (no separation-of-duties check — that hardcoded rule is removed); every decision is appended to the audit trail.",
+      "description": "`portitor pr` handler: parses the action + --pr/--event, checks action.RoleCan against the config's action_roles (default-deny), reads the body from stdin, and dispatches to ActionClient; merge re-derives the full precondition set (the configured review source, CLEAN merge state, required checks, and merge_gate.checks git-content predicates); rerun evaluates PlanRerun's refusals as audited policy denials; review submits the caller's real GitHub event (no separation-of-duties check — that hardcoded rule is removed); every decision is appended to the audit trail.",
       "content": "arch_action.md",
       "implements": []
     },

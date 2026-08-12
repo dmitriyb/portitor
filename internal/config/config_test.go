@@ -250,6 +250,62 @@ func TestValidate(t *testing.T) {
 		t.Fatal("an unknown merge_gate.merge_method value should be invalid")
 	}
 
+	// checks (the Actions-proxy block, 2026-08-12-actions-proxy): the new
+	// verbs and a well-formed block validate; empty/duplicate budget names,
+	// malformed or non-positive durations, and negative numeric fields are
+	// flagged. The unknown-verb case above already pins that an unrecognized
+	// action_roles verb still fails closed.
+	newVerbs := good
+	newVerbs.ActionRoles = map[string][]string{"checks": {"implementer"}, "rerun": {"merger"}, "logs": {"implementer"}}
+	if p := Validate(newVerbs); len(p) != 0 {
+		t.Fatalf("the checks/rerun/logs verbs should validate in action_roles: %v", p)
+	}
+	okChecksBlock := good
+	okChecksBlock.Checks = &action.ChecksConfig{
+		Budgets:       []action.CheckBudget{{Name: "build", Budget: "60s"}, {Name: "test", Budget: "3m"}},
+		DefaultBudget: "5m", MaxAttempts: 3, AllowRerunFailed: true, LogTailBytes: 65536,
+	}
+	if p := Validate(okChecksBlock); len(p) != 0 {
+		t.Fatalf("a well-formed checks block should validate: %v", p)
+	}
+	emptyChecksBlock := good
+	emptyChecksBlock.Checks = &action.ChecksConfig{}
+	if p := Validate(emptyChecksBlock); len(p) != 0 {
+		t.Fatalf("an empty checks block (all defaults) should validate: %v", p)
+	}
+	noNameBudget := good
+	noNameBudget.Checks = &action.ChecksConfig{Budgets: []action.CheckBudget{{Budget: "60s"}}}
+	if p := Validate(noNameBudget); len(p) == 0 {
+		t.Fatal("a checks budget with an empty name should be invalid")
+	}
+	dupBudget := good
+	dupBudget.Checks = &action.ChecksConfig{Budgets: []action.CheckBudget{{Name: "test", Budget: "60s"}, {Name: "test", Budget: "90s"}}}
+	if p := Validate(dupBudget); len(p) == 0 {
+		t.Fatal("a duplicate checks budget name should be invalid (first match wins; the later entry is dead)")
+	}
+	for _, bad := range []string{"nope", "0s", "-5s"} {
+		badBudget := good
+		badBudget.Checks = &action.ChecksConfig{Budgets: []action.CheckBudget{{Name: "test", Budget: bad}}}
+		if p := Validate(badBudget); len(p) == 0 {
+			t.Fatalf("checks budget %q should be invalid", bad)
+		}
+		badDefault := good
+		badDefault.Checks = &action.ChecksConfig{DefaultBudget: bad}
+		if p := Validate(badDefault); len(p) == 0 {
+			t.Fatalf("checks.default_budget %q should be invalid", bad)
+		}
+	}
+	negAttempts := good
+	negAttempts.Checks = &action.ChecksConfig{MaxAttempts: -1}
+	if p := Validate(negAttempts); len(p) == 0 {
+		t.Fatal("a negative checks.max_attempts should be invalid")
+	}
+	negTail := good
+	negTail.Checks = &action.ChecksConfig{LogTailBytes: -1}
+	if p := Validate(negTail); len(p) == 0 {
+		t.Fatal("a negative checks.log_tail_bytes should be invalid")
+	}
+
 	// serve_refresh_timeout: absent is valid (ServeRefreshTimeoutOrDefault
 	// falls back to 30s); a value that fails to parse as a Go duration, or
 	// parses to zero/negative, must be flagged rather than silently

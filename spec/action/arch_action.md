@@ -47,7 +47,7 @@ the push.
 
 `portitor pr <action> --pr N` (bodies read from stdin so multi-line markdown survives transport).
 
-**The action verbs are a closed mechanism set** — `fetch | comment | review | reply | resolve | describe | merge | close` —
+**The action verbs are a closed mechanism set** — `fetch | comment | review | reply | resolve | describe | checks | rerun | logs | merge | close` —
 but **who may perform each is per-repo config, default-deny**: `action_roles` maps each verb to
 the roles allowed to invoke it, and a verb not listed (or listed with no roles, or an absent
 `action_roles` altogether) is refused for everyone. Every action is privileged, so the default is
@@ -63,6 +63,9 @@ opaque strings, consistent with the rest of the system; `validate-config` reject
   "reply":    ["implementer", "fixer", "owner"],
   "resolve":  ["reviewer", "owner"],
   "describe": ["implementer", "owner"],
+  "checks":   ["implementer", "fixer", "reviewer", "merger", "owner"],
+  "logs":     ["implementer", "fixer", "reviewer", "merger", "owner"],
+  "rerun":    ["merger", "owner"],
   "merge":    ["merger", "owner"],
   "close":    ["merger", "owner"]
 }
@@ -117,6 +120,65 @@ bead-close — read by a `merge_gate.checks` predicate). A gate-proxy holding th
 "approved" bit in its own `reviews_log` was a dual-write with no atomicity (a crash between the
 append and the GitHub post, or a lost file, and the only record of approval is gone); it is
 retired (see 2026-08-05-transparent-approve).
+
+## The Actions surface (`checks` + `rerun` + `logs`)
+
+Three verbs proxy the GitHub Actions API — the only route a box has to CI state,
+since its egress reaches GitHub solely through the gate (see
+2026-08-12-actions-proxy). The governing rule is the same as everywhere else:
+**the box names the PR; the gate resolves the run.** No verb accepts a run id,
+job id, or workflow name — the gate derives the workflow run(s) from the PR's
+head SHA, exactly the discipline `-R` encodes for the repo. A caller-supplied
+run id would let a box re-run e.g. a release workflow, publishing artifacts
+outside the review path. `workflow_dispatch` (arbitrary caller inputs — a
+code-execution primitive) is permanently out of the verb set; re-run only
+replays an already-defined workflow on an already-pushed commit, so its blast
+radius is compute.
+
+- **`checks --pr N`** returns, in one JSON response, per-check state (`name`,
+  `status`, `conclusion`, `startedAt`, `completedAt`, `workflowName`), the
+  owning run id / job id (parsed gate-side from `detailsUrl` — callers never
+  parse URLs in shell), the run's `run_attempt` (from the run object; it is not
+  in `statusCheckRollup`), the check's resolved budget in seconds
+  (`checks.budgets` per-name, else the default — data for the caller's
+  stuck-detection; deciding *when* to re-run stays client-side), plus
+  `mergeStateStatus` and `headRefOid`. `fetch` stays the PR-conversation
+  domain; CI and merge-readiness state live here — two verbs, two domains, no
+  overlapping views to drift apart. `run_attempt` matters because callers may
+  be stateless: "have I already re-run this twice?" must be a fact read from
+  GitHub, not a counter held by the caller.
+- **`rerun --pr N`** re-runs the failed/cancelled jobs of the PR head's
+  non-green run(s), cancelling an in-flight run first and waiting for the
+  cancel to complete (the GitHub API has no per-job cancel — the stuck path is
+  run-level: cancel, then re-run failed/cancelled jobs; completed green jobs
+  are not re-run). The gate refuses — each with a distinct, attributable,
+  audited message — when a targeted run's head no longer matches the
+  re-derived PR head (stale), when its `run_attempt` has reached
+  `checks.max_attempts` (the cap that bounds every case), when every job of it
+  completed `FAILURE` and `checks.allow_rerun_failed` is false, and when
+  nothing is a target at all (every run green). Enforcement is gate-side
+  because box-side limits are advisory — the same reasoning that makes
+  `merge_gate` re-derive state rather than trust the request. The gate cannot
+  distinguish an automation prelude from an agent (same role), so "re-run only
+  stuck jobs automatically" is client-side policy, never a gate guarantee. On
+  success it returns the new attempt number per re-run run, so a caller
+  confirms the re-run took.
+- **`logs --pr N`** returns the logs of **failed jobs only**, each tailed and
+  byte-capped gate-side at `checks.log_tail_bytes` — a caller cannot request
+  the full log (Actions logs reach tens of megabytes; the cap is enforced
+  where the box cannot override it, and it is the natural redaction point).
+  The gate returns bytes; agents interpret them — no log parsing or failure
+  classification in portitor.
+
+The `checks` config block (beside `merge_gate`) carries the policy:
+per-check-name `budgets` (+ `default_budget`; budgets are per name because
+healthy checks legitimately differ by an order of magnitude), `max_attempts`
+(default 3), `allow_rerun_failed` (default false), `log_tail_bytes` (default
+64 KiB). All three verbs are `action_roles`-gated, default-deny like every
+other verb; the recommended policy grants `rerun` only to the landing identity
+(`merger`, `owner`) and the read verbs to every working role
+(`identity_only_roles` constrains commit-signing trust, not API actions — no
+conflict).
 
 ## Merge preconditions (re-derived, never trusted; review source configurable)
 

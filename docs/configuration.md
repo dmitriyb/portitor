@@ -52,28 +52,49 @@ This document is the practical reference: the schema by example, `allowed_signer
     "review":  ["reviewer", "owner"],
     "reply":   ["implementer", "owner"],
     "resolve": ["reviewer", "owner"],
+    "checks":  ["implementer", "reviewer", "merger", "owner"],
+    "logs":    ["implementer", "reviewer", "merger", "owner"],
+    "rerun":   ["merger", "owner"],
     "merge":   ["merger", "owner"],
     "close":   ["merger", "owner"]
   },
 
-  // Merge review-precondition source + command predicates. Absent block (or
-  // absent review field) = "internal": a reviews_log approval for the PR's
-  // CURRENT head, by a role action_roles allows to review — the right model
-  // when the PAT account authors the PRs (GitHub then never sets
-  // reviewDecision and refuses self-approval). "github" = the legacy
-  // reviewDecision == APPROVED; "none" = no review precondition.
-  // checks: hermetic command predicates (argv verbatim + PR number + head SHA
-  // appended; run in the bare repo dir; exit 0 = met). mergeStateStatus ==
-  // CLEAN stays mandatory regardless.
-  "merge_gate": {
-    "review": "internal",
-    "checks": [ {"name": "bead-closed", "command": ["br", "--no-db", "…"]} ]
+  // Actions-proxy policy for the checks/rerun/logs verbs (see
+  // spec/proposals/2026-08-12-actions-proxy.md). budgets: per-check-name "how
+  // long before a pending check counts as stuck" — surfaced by `pr checks` as
+  // budgetSeconds (data for the caller; deciding WHEN to re-run stays
+  // client-side). max_attempts: gate-enforced re-run attempt cap (default 3).
+  // allow_rerun_failed: may a run whose jobs ALL completed FAILURE be re-run
+  // (default false). log_tail_bytes: per-job tail cap for `pr logs`, enforced
+  // gate-side (default 65536).
+  "checks": {
+    "budgets": [ {"name": "test", "budget": "3m"} ],
+    "default_budget": "5m",
+    "max_attempts": 3,
+    "allow_rerun_failed": false,
+    "log_tail_bytes": 65536
   },
 
-  // REQUIRED when the effective merge_gate.review is "internal" (the
-  // default): one appended, fsync'd JSON line per review verdict — the record
-  // merge consults. Same file discipline as audit_log.
-  "reviews_log": "/srv/git/audit/myrepo-reviews.jsonl",
+  // Merge review-precondition source + command predicates + merge method
+  // (see 2026-08-05-transparent-approve / 2026-08-05-configurable-merge-
+  // method). review: "github" = native reviewDecision == APPROVED
+  // (separated-account deployments — GitHub itself enforces approvals and
+  // refuses self-approval); "none" (the default when the block or field is
+  // absent) = no review precondition here — express one, if wanted, as a
+  // checks predicate over git content (e.g. a reviewer-signed record; the
+  // single-account model). checks: hermetic command predicates (argv
+  // verbatim + PR number + head SHA appended; run in the bare repo dir;
+  // exit 0 = met). merge_method: squash (default) | merge | rebase.
+  // mergeStateStatus == CLEAN stays mandatory regardless. The retired
+  // model is gone: a config still carrying the reviews_log key fails
+  // strict decode at every load (unknown top-level key), and review:
+  // "internal" fails validate-config (so the container refuses to boot)
+  // and is refused as an unmet precondition if it ever reaches a merge.
+  "merge_gate": {
+    "review": "none",
+    "checks": [ {"name": "bead-closed", "command": ["br", "--no-db", "…"]} ],
+    "merge_method": "squash"
+  },
 
   // Roles whose keys are landing-only and must never gain commit-signing trust.
   // add-role refuses --pub for them and refuses rebinding an already-trusted key
