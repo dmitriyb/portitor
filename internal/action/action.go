@@ -1,6 +1,7 @@
 // Package action mediates the GitHub actions portitor performs on the upstream
-// with its own credential — PR open/comment/review/merge/close and read-side
-// fetch. It is NOT a passthrough: callers pass structured, validated requests
+// with its own credential — PR open/comment/review/merge/close, read-side
+// fetch, and the Actions proxy (checks/rerun/logs, see checks.go). It is NOT
+// a passthrough: callers pass structured, validated requests
 // (the gh arguments are constructed here, never forwarded from the agent), so
 // the agent can never run arbitrary gh. Authority is decided by the caller
 // (post-receive for auto-open; the role-checked `portitor pr` handler for the
@@ -48,6 +49,10 @@ func defaultRunner(args ...string) (string, error) {
 type GH struct {
 	Repo string // owner/name
 	Run  Runner // nil => the real gh binary
+	// Poll is the interval between Actions-API polls (rerun's cancel-wait and
+	// attempt-confirm loops, see checks.go). 0 => a 2s default; tests set a
+	// tiny value so stubbed polls never sleep for real.
+	Poll time.Duration
 }
 
 func (g GH) run(args ...string) (string, error) {
@@ -560,12 +565,21 @@ type MergeState struct {
 
 // CheckRun is one entry of statusCheckRollup. GitHub mixes two shapes (check
 // runs and legacy status contexts); Name/Context and Conclusion/State are the
-// respective pairs.
+// respective pairs. The remaining fields are check-run-shape only (the wire
+// always carried them; the checks verb surfaces them — see checks.go):
+// Status/StartedAt/CompletedAt/WorkflowName describe the run's progress, and
+// DetailsURL embeds the owning run/job ids the gate parses out (runJobIDs) so
+// a caller never has to.
 type CheckRun struct {
-	Name       string `json:"name"`
-	Context    string `json:"context"`
-	Conclusion string `json:"conclusion"`
-	State      string `json:"state"`
+	Name         string `json:"name"`
+	Context      string `json:"context"`
+	Conclusion   string `json:"conclusion"`
+	State        string `json:"state"`
+	Status       string `json:"status"`
+	StartedAt    string `json:"startedAt"`
+	CompletedAt  string `json:"completedAt"`
+	WorkflowName string `json:"workflowName"`
+	DetailsURL   string `json:"detailsUrl"`
 }
 
 // checkName returns the entry's identifying name across both shapes.

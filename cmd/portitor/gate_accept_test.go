@@ -44,7 +44,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/dmitriyb/portitor/internal/action"
 	"github.com/dmitriyb/portitor/internal/config"
 	"github.com/dmitriyb/portitor/internal/gate"
 )
@@ -325,6 +327,282 @@ func TestGateAccept_MirrorRefreshOnServe(t *testing.T) {
 	}
 	if !strings.Contains(out, "portitor:") {
 		t.Errorf("clone failure should surface portitor's wrapped diagnostic; output:\n%s", out)
+	}
+}
+
+// ---- the Actions-proxy rerun path (2026-08-12-actions-proxy) ----
+
+// rerunSettings is the Actions-proxy scenario's per-repo config: the read
+// verbs (checks/logs) granted to implementer + merger, rerun to the merger
+// only (the recommended landing-identity isolation), and a checks block with
+// a per-name budget, a tight attempt cap (2 — so the scenario can hit the cap
+// with a single re-run), and a small log tail cap (600 bytes — real Actions
+// job logs are KBs, so gate-side truncation is guaranteed observable).
+func rerunSettings(roles map[string]roleKey, upstreamSlug, allowedSignersPath string) config.Settings {
+	rolesMap := make(map[string]string, len(roles))
+	for _, rk := range roles {
+		rolesMap[rk.fingerprint] = rk.role
+	}
+	return config.Settings{
+		FormatVersion: config.SupportedFormatVersion,
+		Config: gate.Config{
+			DefaultBranch:  "main",
+			AllowedSigners: allowedSignersPath,
+			Roles:          rolesMap,
+		},
+		UpstreamSlug: upstreamSlug,
+		ActionRoles: map[string][]string{
+			"checks": {"implementer", "merger"},
+			"logs":   {"implementer", "merger"},
+			"rerun":  {"merger"},
+		},
+		Checks: &action.ChecksConfig{
+			Budgets:       []action.CheckBudget{{Name: "fail", Budget: "30s"}},
+			DefaultBudget: "2m",
+			MaxAttempts:   2,
+			LogTailBytes:  600,
+		},
+	}
+}
+
+// rerunWorkflowYAML is the CI the scenario's feature branch carries: one
+// passing and one deliberately failing job, so the run completes red without
+// being ALL-failed (allow_rerun_failed stays false and untriggered — the
+// all-failed guard is unit-tested; this scenario exercises the mixed case a
+// flaky-CI re-run actually meets). The failure prints enough output that the
+// 600-byte gate-side tail cap is guaranteed to truncate.
+const rerunWorkflowYAML = `name: gateaccept-rerun
+on: push
+jobs:
+  pass:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gateaccept pass"
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for i in $(seq 1 50); do echo "gateaccept intentional failure line $i"; done
+          exit 1
+`
+
+// waitRunsCompleted polls the Actions API (directly, harness-side) until at
+// least one workflow run exists for the head SHA and every run for it has
+// completed. Hosted-runner queue time dominates here, hence the long
+// deadline.
+func waitRunsCompleted(t *testing.T, repo, headSHA string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Minute)
+	var last string
+	for time.Now().Before(deadline) {
+		out, err := ghAPIOK("api", fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", repo, headSHA))
+		if err == nil {
+			var listed struct {
+				WorkflowRuns []struct {
+					Status string `json:"status"`
+				} `json:"workflow_runs"`
+			}
+			if jerr := json.Unmarshal(out, &listed); jerr == nil && len(listed.WorkflowRuns) > 0 {
+				done := true
+				for _, r := range listed.WorkflowRuns {
+					if r.Status != "completed" {
+						done = false
+					}
+					last = r.Status
+				}
+				if done {
+					return
+				}
+			} else {
+				last = "no runs yet"
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+	t.Fatalf("workflow runs for head %s did not complete within 10m (last status: %q)", headSHA, last)
+}
+
+// TestGateAccept_RerunPath drives the Actions-proxy verbs end-to-end through
+// the real gate against real GitHub Actions (2026-08-12-actions-proxy),
+// asserting the gate's decisions AND the resulting GitHub state at each step:
+//
+//  1. implementer pushes a feature branch carrying a pass+fail workflow ->
+//     gate accepts, auto-opens a PR; the run completes red (mixed, not
+//     all-failed). NOTE: the gate forwards the branch with its PAT — pushing
+//     .github/workflows/** requires the PAT to carry the workflow scope, and
+//     Actions must be enabled on the disposable repo.
+//  2. `pr checks` (implementer) returns per-check state + runAttempt=1 +
+//     the resolved budgets + mergeStateStatus/headRefOid in one response.
+//  3. `pr logs` (implementer) returns the FAILED job's log only, tailed
+//     gate-side to checks.log_tail_bytes.
+//  4. `pr rerun` as implementer -> denied (action_roles grants merger only).
+//  5. `pr rerun` as merger -> re-runs the failed job; the receipt reports
+//     previousAttempt 1 -> newAttempt 2, confirmed against GitHub.
+//  6. a second `pr rerun` -> refused at the checks.max_attempts cap (2), with
+//     the attributable message.
+func TestGateAccept_RerunPath(t *testing.T) {
+	env := setupGateAccept(t)
+	resetDisposableRepo(t, env)
+
+	tmp := t.TempDir()
+	roles := genRoleKeys(t, filepath.Join(tmp, "keys"), "implementer", "merger")
+
+	cfgDir := filepath.Join(tmp, "portitor-config")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "repos.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// merger is landing-only by convention but signs nothing here anyway; only
+	// the implementer's key needs commit-signing trust.
+	writeAllowedSigners(t, filepath.Join(cfgDir, "allowed_signers"), roles["implementer"])
+
+	const repoName = "gateaccept-rerun"
+	settings := rerunSettings(roles, env.GH.Repo, "/etc/portitor/allowed_signers")
+	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
+	chmodTreeReadable(t, cfgDir)
+
+	gi := standUpGate(t, cfgDir, roles, env.PAT)
+	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
+
+	// ---- step 1: push a feature branch carrying the pass+fail workflow ----
+	implDir := gi.cloneAsRole(t, roles["implementer"], repoName)
+	gitConfigSigning(t, implDir, roles["implementer"], "implementer@gateaccept.test")
+	mustRun(t, "git", "-C", implDir, "checkout", "-q", "-b", "feature/gateaccept-rerun")
+	wfPath := filepath.Join(implDir, ".github", "workflows", "gateaccept-rerun.yml")
+	if err := os.MkdirAll(filepath.Dir(wfPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wfPath, []byte(rerunWorkflowYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "git", "-C", implDir, "add", "-A")
+	mustRun(t, "git", "-C", implDir, "commit", "-q", "-S", "-m", "gateaccept: add pass+fail workflow")
+	out, err := gi.pushAsRole(t, roles["implementer"], implDir, "feature/gateaccept-rerun")
+	if err != nil {
+		t.Fatalf("implementer's signed workflow push should be accepted (does the PAT carry the workflow scope?):\n%s", out)
+	}
+	pr := parsePRNumber(t, out)
+	headSHA := strings.TrimSpace(runGit(t, implDir, "rev-parse", "HEAD"))
+	t.Logf("opened PR #%d, head %s", pr, headSHA)
+	waitRunsCompleted(t, env.GH.Repo, headSHA)
+
+	// ---- step 2: `pr checks` returns the folded report ----
+	checksOut, checksErr, err := gi.runPRAs(t, roles["implementer"], "", "checks", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err != nil {
+		t.Fatalf("checks should be granted to implementer: %v\nstderr:\n%s", err, checksErr)
+	}
+	var report action.ChecksReport
+	if err := json.Unmarshal([]byte(checksOut), &report); err != nil {
+		t.Fatalf("checks output not valid JSON: %v\n%s", err, checksOut)
+	}
+	if report.HeadRefOid != headSHA {
+		t.Errorf("checks headRefOid = %q, want the pushed head %s", report.HeadRefOid, headSHA)
+	}
+	if report.MergeStateStatus == "" {
+		t.Error("checks response must carry mergeStateStatus")
+	}
+	var failCheck, passCheck *action.CheckStatus
+	for i := range report.Checks {
+		switch report.Checks[i].Name {
+		case "fail":
+			failCheck = &report.Checks[i]
+		case "pass":
+			passCheck = &report.Checks[i]
+		}
+	}
+	if failCheck == nil || passCheck == nil {
+		t.Fatalf("checks report must carry the workflow's pass+fail jobs; got %+v", report.Checks)
+	}
+	if failCheck.Conclusion != "FAILURE" || failCheck.RunAttempt != 1 || failCheck.RunID == 0 || failCheck.JobID == 0 {
+		t.Errorf("fail check = %+v, want conclusion FAILURE, runAttempt 1, resolved run/job ids", failCheck)
+	}
+	if failCheck.BudgetSeconds != 30 {
+		t.Errorf("fail check budgetSeconds = %d, want the per-name 30", failCheck.BudgetSeconds)
+	}
+	if passCheck.BudgetSeconds != 120 {
+		t.Errorf("pass check budgetSeconds = %d, want the 120s default_budget", passCheck.BudgetSeconds)
+	}
+
+	// ---- step 3: `pr logs` returns the failed job's tail, capped ----
+	logsOut, logsErr, err := gi.runPRAs(t, roles["implementer"], "", "logs", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err != nil {
+		t.Fatalf("logs should be granted to implementer: %v\nstderr:\n%s", err, logsErr)
+	}
+	var logs struct {
+		Jobs []action.JobLog `json:"jobs"`
+	}
+	if err := json.Unmarshal([]byte(logsOut), &logs); err != nil {
+		t.Fatalf("logs output not valid JSON: %v\n%s", err, logsOut)
+	}
+	var failLog *action.JobLog
+	for i := range logs.Jobs {
+		if logs.Jobs[i].JobName == "fail" {
+			failLog = &logs.Jobs[i]
+		}
+		if logs.Jobs[i].JobName == "pass" {
+			t.Errorf("logs must carry FAILED jobs only, got the pass job too")
+		}
+	}
+	if failLog == nil {
+		t.Fatalf("logs must carry the failed job, got %+v", logs.Jobs)
+	}
+	if len(failLog.Log) > 600 {
+		t.Errorf("failed job log is %d bytes, must be capped at checks.log_tail_bytes 600", len(failLog.Log))
+	}
+	if !failLog.Truncated {
+		t.Error("a real Actions job log exceeds 600 bytes; truncated should be true")
+	}
+	if !strings.Contains(failLog.Log, "intentional failure") {
+		t.Errorf("the tail should carry the job's final output, got:\n%s", failLog.Log)
+	}
+
+	// ---- step 4: rerun denied for the implementer ----
+	_, rerunDenyErr, err := gi.runPRAs(t, roles["implementer"], "", "rerun", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err == nil {
+		t.Fatal("implementer should be denied rerun (action_roles grants merger only)")
+	}
+	if !strings.Contains(rerunDenyErr, "may not") {
+		t.Errorf("denial should name the role/action; stderr:\n%s", rerunDenyErr)
+	}
+
+	// ---- step 5: rerun as merger takes; the receipt confirms attempt 2 ----
+	rerunOut, rerunErr, err := gi.runPRAs(t, roles["merger"], "", "rerun", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err != nil {
+		t.Fatalf("merger's rerun should succeed: %v\nstdout:\n%s\nstderr:\n%s", err, rerunOut, rerunErr)
+	}
+	var receipts struct {
+		Reruns []action.RerunOutcome `json:"reruns"`
+	}
+	if err := json.Unmarshal([]byte(rerunOut), &receipts); err != nil {
+		t.Fatalf("rerun receipt not valid JSON: %v\n%s", err, rerunOut)
+	}
+	var ourRerun *action.RerunOutcome
+	for i := range receipts.Reruns {
+		if receipts.Reruns[i].WorkflowName == "gateaccept-rerun" {
+			ourRerun = &receipts.Reruns[i]
+		}
+	}
+	if ourRerun == nil || ourRerun.PreviousAttempt != 1 || ourRerun.NewAttempt != 2 {
+		t.Fatalf("rerun receipt = %+v, want gateaccept-rerun attempt 1 -> 2", receipts.Reruns)
+	}
+	// Confirm against GitHub directly: the run object's attempt moved.
+	runObj := ghAPI(t, "api", fmt.Sprintf("repos/%s/actions/runs/%d", env.GH.Repo, ourRerun.RunID))
+	var runState struct {
+		RunAttempt int `json:"run_attempt"`
+	}
+	if err := json.Unmarshal(runObj, &runState); err != nil {
+		t.Fatalf("parse run object: %v", err)
+	}
+	if runState.RunAttempt != 2 {
+		t.Fatalf("GitHub reports run %d at attempt %d, want 2", ourRerun.RunID, runState.RunAttempt)
+	}
+
+	// ---- step 6: a second rerun is refused at the attempt cap ----
+	_, capErr, err := gi.runPRAs(t, roles["merger"], "", "rerun", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	if err == nil {
+		t.Fatal("a second rerun should be refused at checks.max_attempts = 2")
+	}
+	if !strings.Contains(capErr, "checks.max_attempts") {
+		t.Errorf("the cap refusal should be attributable to checks.max_attempts; stderr:\n%s", capErr)
 	}
 }
 

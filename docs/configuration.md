@@ -52,8 +52,27 @@ This document is the practical reference: the schema by example, `allowed_signer
     "review":  ["reviewer", "owner"],
     "reply":   ["implementer", "owner"],
     "resolve": ["reviewer", "owner"],
+    "checks":  ["implementer", "reviewer", "merger", "owner"],
+    "logs":    ["implementer", "reviewer", "merger", "owner"],
+    "rerun":   ["merger", "owner"],
     "merge":   ["merger", "owner"],
     "close":   ["merger", "owner"]
+  },
+
+  // Actions-proxy policy for the checks/rerun/logs verbs (see
+  // spec/proposals/2026-08-12-actions-proxy.md). budgets: per-check-name "how
+  // long before a pending check counts as stuck" — surfaced by `pr checks` as
+  // budgetSeconds (data for the caller; deciding WHEN to re-run stays
+  // client-side). max_attempts: gate-enforced re-run attempt cap (default 3).
+  // allow_rerun_failed: may a run whose jobs ALL completed FAILURE be re-run
+  // (default false). log_tail_bytes: per-job tail cap for `pr logs`, enforced
+  // gate-side (default 65536).
+  "checks": {
+    "budgets": [ {"name": "test", "budget": "3m"} ],
+    "default_budget": "5m",
+    "max_attempts": 3,
+    "allow_rerun_failed": false,
+    "log_tail_bytes": 65536
   },
 
   // Merge review-precondition source + command predicates. Absent block (or

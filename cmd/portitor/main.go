@@ -365,7 +365,7 @@ type prOptions struct {
 
 func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(errw, "portitor pr: action required (fetch|comment|review|reply|resolve|describe|merge|close)")
+		fmt.Fprintln(errw, "portitor pr: action required (fetch|comment|review|reply|resolve|describe|checks|rerun|logs|merge|close)")
 		return 2
 	}
 	act := args[0]
@@ -493,6 +493,41 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		default:
 			return fail(errors.New("resolve: --thread <id> or --gate-threads required"))
 		}
+	case "checks":
+		// One JSON response: per-check state + each owning run's run_attempt +
+		// mergeStateStatus/headRefOid, so a stateless caller reads everything
+		// from one call (see spec/proposals/2026-08-12-actions-proxy.md).
+		res, err := gh.Checks(prNum, s.Checks)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Fprint(out, res)
+	case "rerun":
+		// The gate resolves the run(s) from the PR head — the caller names no
+		// run id — and PlanRerun's refusals (stale head, attempt cap, all-
+		// failed switch, nothing-to-re-run) are policy denials, audited with
+		// their distinct reasons like every other deny.
+		state, err := gh.FetchRunState(prNum)
+		if err != nil {
+			return fail(err)
+		}
+		targets, refusals := action.PlanRerun(state.HeadSHA, state.Runs, s.Checks)
+		if len(refusals) > 0 {
+			return deny(fmt.Sprintf("PR #%d rerun refused: %s", prNum, strings.Join(refusals, "; ")))
+		}
+		res, err := gh.ExecuteRerun(targets)
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Fprint(out, res)
+	case "logs":
+		// Failed jobs only, each tailed gate-side to checks.log_tail_bytes —
+		// the cap is enforced here, where the caller cannot override it.
+		res, err := gh.FailedJobLogs(prNum, s.Checks.LogTailBytesOrDefault())
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Fprint(out, res)
 	case "merge":
 		st, err := gh.FetchMergeState(prNum)
 		if err != nil {
