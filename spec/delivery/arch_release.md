@@ -2,14 +2,20 @@
 
 Triggered by `push` of a `v*` tag. Two files own it: `.goreleaser.yaml` (what GoReleaser builds)
 and `.github/workflows/release.yml` (the steps GoReleaser doesn't do itself). Everything downstream
-of "the four archives exist in `dist/`" — per-artifact checksums, the manifest, the provenance
+of "the archives exist in `dist/`" — per-artifact checksums, the manifest, the provenance
 attestation — is explicit workflow steps, not GoReleaser plugins, so each is independently
 readable and independently rerunnable.
 
+One tag ships **two tools** — `portitor` (the git-side gate) and `portitor-mcp` (the MCP
+mediator, see `spec/mcp/arch_mcp.md`) — at one version through this one pipeline and signing
+key: the shared config discipline makes lockstep the correct semantics, and one version number
+states "this pair was tested together". Eight archives per release: two tools × the four-target
+matrix.
+
 ## Build (GoReleaser)
 
-`.goreleaser.yaml`'s `builds` entry compiles `./cmd/portitor` for the four-target matrix (`linux`/
-`darwin` × `amd64`/`arm64`) with:
+`.goreleaser.yaml`'s `builds` entries compile `./cmd/portitor` and `./cmd/portitor-mcp` for the
+four-target matrix (`linux`/`darwin` × `amd64`/`arm64`), each with:
 
 - `CGO_ENABLED=0` — matches the Dockerfile's static build, no libc dependency to cross-compile.
 - `-trimpath` and ldflags `-s -w` — no build-machine paths or symbol table in the shipped binary.
@@ -17,11 +23,14 @@ readable and independently rerunnable.
   the three vars `cmd/portitor/version.go` declares (default `"dev"`/`"none"`/`"unknown"` for a
   plain `go build`), surfaced by `portitor version` / `portitor --version` / `portitor -v`. A
   downloaded binary's version output is then a direct, unfalsifiable link back to the tag, commit,
-  and build time that produced it.
+  and build time that produced it. Both binaries declare the same three vars, so one tag stamps
+  the pair identically.
 
-Each build is archived (`archives`) as `portitor_<version>_<os>_<arch>.tar.gz`, bundling the binary
-with `README.md` and `LICENSE`. `checksum.name_template: checksums.txt` produces one consolidated
-sha256 file over all four archives (GoReleaser's `checksum` block only ever produces this single
+Each build is archived (`archives`) as `<tool>_<version>_<os>_<arch>.tar.gz` (each archive pins
+its build via `ids` — without it an archive would bundle every build and the two binaries would
+ship interleaved), bundling the binary with `README.md` and `LICENSE`.
+`checksum.name_template: checksums.txt` produces one consolidated
+sha256 file over all archives (GoReleaser's `checksum` block only ever produces this single
 combined file — per-artifact `.sha256` files are a workflow step, below).
 
 ## Signing (SSHSIG)
@@ -54,23 +63,23 @@ published `install.sh` (`install.sh.sig`), so the installer itself is verifiable
 ## Publish (GoReleaser → GitHub Release)
 
 `goreleaser release --clean` (invoked via `goreleaser/goreleaser-action`) creates the GitHub
-release itself from the `v*` tag and uploads the four archives, `checksums.txt`, and the four
+release itself from the `v*` tag and uploads the eight archives, `checksums.txt`, and their
 `.sig` files. `release.prerelease: auto` in `.goreleaser.yaml` marks a tag containing a
 pre-release suffix (e.g. `v0.1.0-rc.1`) as a GitHub pre-release automatically — no separate
 `workflow_dispatch` input to remember to set.
 
 ## Per-artifact checksums
 
-A consolidated `checksums.txt` is enough to verify all four archives together, but not to verify
-one binary in isolation without the other three. The release workflow's "Generate per-artifact
+A consolidated `checksums.txt` is enough to verify all archives together, but not to verify
+one binary in isolation without the rest. The release workflow's "Generate per-artifact
 checksums" step covers that case directly:
 
 ```bash
 cd dist
-for f in portitor_*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
+for f in portitor_*.tar.gz portitor-mcp_*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
 ```
 
-producing `portitor_<version>_<os>_<arch>.tar.gz.sha256` per archive, uploaded to the release
+producing `<tool>_<version>_<os>_<arch>.tar.gz.sha256` per archive, uploaded to the release
 alongside `manifest.json` via `gh release upload … --clobber` (GoReleaser has already created the
 release by this point; `gh release upload` adds assets to it rather than creating a second one).
 
@@ -84,7 +93,7 @@ fields are relative to the root GoReleaser was invoked from).
   `date` directly.
 - `dist/artifacts.json` is an array covering every artifact GoReleaser produced (binaries,
   archives, the metadata file itself); the script filters to `type == "Archive"` — exactly the
-  four published `.tar.gz` files, not the intermediate per-target binary directories GoReleaser
+  published `.tar.gz` files, not the intermediate per-target binary directories GoReleaser
   also lists.
 - For each archive entry, the script does **not** trust `artifacts.json`'s own `extra.Checksum`
   field (present on modern GoReleaser, but an unverified assumption is a needless dependency on
@@ -93,7 +102,9 @@ fields are relative to the root GoReleaser was invoked from).
   self-verifying: it says what the bytes in `dist/` actually hash to, not what GoReleaser's
   internal bookkeeping claims they hash to.
 - `target` is `<goos>_<goarch>` (e.g. `linux_amd64`), matching the archive's own naming
-  convention.
+  convention. With two tools per release a target alone no longer identifies an artifact, so
+  each entry also names its `tool`, derived from the archive-name prefix
+  (`<tool>_<version>_<os>_<arch>.tar.gz`) — a consumer pins `(tool, target)`.
 
 Output shape (`schema_version` pins the shape itself, independent of `tool`'s version):
 
@@ -109,6 +120,7 @@ Output shape (`schema_version` pins the shape itself, independent of `tool`'s ve
   "artifacts": [
     {
       "name": "portitor_0.1.0_linux_amd64.tar.gz",
+      "tool": "portitor",
       "target": "linux_amd64",
       "sha256": "…",
       "size_bytes": 1346559,
@@ -127,9 +139,9 @@ same `dist/` is idempotent and side-effect-free (it only reads).
 
 ## SLSA provenance
 
-The release job's last step, `actions/attest-build-provenance`, runs with `subject-path:
-dist/portitor_*.tar.gz` (the four archives only — not the checksum/signature/manifest files, which
-aren't independently executable artifacts). The workflow's `permissions: {id-token: write,
+The release job's last step, `actions/attest-build-provenance`, runs with a `subject-path`
+covering `dist/portitor_*.tar.gz` and `dist/portitor-mcp_*.tar.gz` (the archives only — not the
+checksum/signature/manifest files, which aren't independently executable artifacts). The workflow's `permissions: {id-token: write,
 attestations: write}` are what let this step mint a Sigstore-backed attestation from the job's
 OIDC identity; a verifier runs `gh attestation verify <archive> --owner <org>` and gets an
 independent, GitHub-native chain of custody back to *this exact workflow run* — distinct from, and

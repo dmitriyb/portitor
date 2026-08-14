@@ -24,13 +24,17 @@ command="portitor shell <fingerprint>",restrict ssh-ed25519 AAAA… agent-key
 |---|---|---|
 | `git-receive-pack '<path>'` / `git-upload-pack '<path>'` | `git` | exec the real pack command (so pre/post-receive = the gate runs); `<path>` confined to the repo root, `*.git`, no `..` |
 | `portitor pr <action> …` | `pr` | run the role-gated action API; role = `Config.Roles[fingerprint]` |
+| `portitor mcp` (exactly two tokens) | `mcp` | splice stdio to the `portitor-mcp` mediator (see `spec/mcp/arch_mcp.md`) |
 | anything else — including `git-upload-archive` | reject | refused |
 
-This table is **closed**: exactly the two pack commands and `portitor pr`. `git-upload-archive`
-is deliberately rejected (no supported flow needs archives; the narrowest surface wins). So a
-single key grants **gated git push/clone + the narrow action API and nothing else** — no
-interactive shell, no arbitrary commands. The dispatcher exports the caller's key fingerprint to
-the pack subprocess environment, so the hooks can attribute the push in the audit trail.
+This table is **closed**: exactly the two pack commands, `portitor pr`, and `portitor mcp`.
+`git-upload-archive` is deliberately rejected (no supported flow needs archives; the narrowest
+surface wins). So a single key grants **gated git push/clone + the narrow action API + the
+shape-validated MCP splice and nothing else** — no interactive shell, no arbitrary commands. The
+dispatcher exports the caller's key fingerprint to the pack subprocess environment, so the hooks
+can attribute the push in the audit trail; on the `mcp` route it asserts the same fingerprint in
+the splice header (the mediation itself — role check, schema validation, audit — is the `mcp`
+module's, at its own, weaker guarantee tier).
 
 ## Auto-open PR (post-receive)
 

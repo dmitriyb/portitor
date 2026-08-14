@@ -1,0 +1,99 @@
+{
+  "name": "mcp",
+  "description": "Shape-validated MCP mediation over the same SSH channel: portitor-mcp, a separate mediator binary, extends the single-credential invariant from GitHub to every MCP upstream. The agent reaches MCP tools through the existing SSH key and the portitor shell dispatcher's third route; the mediator holds the upstream credentials, validates every tool call against operator-pinned allowlist schemas, and forwards canonically. This is a third, weaker enforcement tier — shape-validated forwarding, never gate-grade or pr-grade authority. NOTE: hand-authored SEED in spexmachina's format; identity hashes are generated when run through spex.",
+  "requirements": [
+    {
+      "type": "functional",
+      "title": "A named third tier: shape-validated forwarding, documented as such",
+      "description": "MCP calls are imperative JSON-RPC: there is no artifact to verify (the gate's tier) and no managed state to tie a call to (the pr API's tier). The MCP surface is therefore a third, weaker guarantee tier — only these tools, only these argument shapes, only this role, audited, credentials never leaving the mediator — the egress allowlist's guarantee class lifted from host granularity to tool-call granularity. Documentation must state this tier explicitly and never present the surface as gate-grade or pr-grade authority. Shapes, not semantics: annotations.readOnlyHint and every other upstream-declared annotation are untrusted; portitor validates the operator's per-tool predicates and claims nothing about what a tool means. The operator who writes the predicates carries the burden of knowing the tool's JSON shape — that maintenance is the security review, made explicit."
+    },
+    {
+      "type": "functional",
+      "title": "Same channel, third route (splice, not exec)",
+      "description": "classify() gains one row and the table stays closed: `portitor mcp` — exactly two tokens, no arguments — routes the SSH connection's stdio to the separately running portitor-mcp process (PORTITOR_MCP_TARGET: unix:<path> or tcp:<host>:<port>, a deploy choice). The dispatcher writes one strict-decoded JSON header line {\"fingerprint\":\"SHA256:…\"} then splices bytes both ways; identity stays the SSH key fingerprint, no new key, no new endpoint. The git-side process never execs MCP code, never parses or interprets MCP traffic (it links only the shared splice grammar in internal/mcpwire — target parsing and the header type), and never holds MCP upstream tokens; the mediator never holds the GitHub credential — different process, different user/container, different credential set. An unset or undialable target refuses cleanly (the git-side binary tolerates a missing mediator). The socket's reachability is the trust boundary for the asserted fingerprint and must be confined to the dispatcher."
+    },
+    {
+      "type": "functional",
+      "title": "Hand-rolled MCP stdio server subset (closed method table)",
+      "description": "The mediator implements the server side of the MCP stdio transport (newline-delimited JSON-RPC 2.0) for exactly: initialize (answered from config, lenient read — nothing of it is forwarded), notifications/initialized (ignored), ping, tools/list (served from config, pinned: exactly the caller's role's granted tools with inputSchema synthesized from the params allowlist, sorted; never an upstream's advertisement), and tools/call. Every other request is refused with -32601 and audited; every other notification is dropped. Server-initiated flows are not forwarded in either direction: upstream requests (sampling, elicitation) are answered -32601 by the mediator, upstream notifications (tools/list_changed included) are dropped. No MCP SDK: the subset is small enough to own, and owning it avoids adopting a surface that would then need piecemeal auditing and refusal."
+    },
+    {
+      "type": "functional",
+      "title": "tools/call: default-deny role check, strict shape validation, canonical forward",
+      "description": "On tools/call the mediator: (1) strictly decodes params as exactly {name, arguments?} — unknown keys, _meta included, refused; absent arguments is {}; (2) requires the tool configured and the caller's role granted in tool_roles (default-deny: a tool absent from tool_roles or listed with no roles is refused for everyone); (3) validates arguments against the tool's params allowlist schema — allowlist, never denylist: unknown fields refused, everything not explicitly allowed refused; (4) re-serializes the accepted arguments canonically (keys sorted, numeric literals preserved verbatim) and constructs a fresh request {name: upstream_name, arguments: canonical} with a mediator-assigned id, so the bytes reaching the upstream are the bytes the predicate saw — never a second parse with different tolerances; (5) relays the upstream's result or error under the caller's original id, bounded by the configured message caps and call timeout. Refusals are visible JSON-RPC errors naming the reason class, never silent."
+    },
+    {
+      "type": "functional",
+      "title": "Minimal params matcher grammar",
+      "description": "params.fields maps each allowed argument name to {type: string|integer|number|boolean (required), required?: bool, enum?: non-empty same-typed array, const?: same-typed value; enum and const mutually exclusive}. No objects or arrays in v1 — a nested shape the operator cannot fully pin must not be forwarded. arguments must be a JSON object; integer means a JSON number whose literal is an optionally-signed digit run (no fraction, no exponent) — checked on the literal so no float round-trip can smuggle a non-integer; enum/const compare by decoded value, numbers by literal. tools/list synthesizes the JSON Schema view (type object, properties, required, additionalProperties: false) from the same spec."
+    },
+    {
+      "type": "functional",
+      "title": "Pinned tool list; upstream advertisement drift fails closed",
+      "description": "The exposed tool set and each tool's expected schema live only in the mediator's config. On an upstream's first spawn in a session the mediator handshakes and calls tools/list once, then checks each configured tool against the advertisement: the upstream_name must be advertised; every advertised inputSchema.required name must be a required field of the configured params; when the advertisement declares properties, every configured field must appear among them; an advertised primitive type string must agree with the configured type (integer accepts an advertised number). Only this bounded slice of JSON Schema is read; an advertisement too malformed to read it refuses the tool. A pinning refusal is sticky for the session and audited — upstream schema drift is a visible refusal fixed in config, not a silent hole."
+    },
+    {
+      "type": "functional",
+      "title": "Upstreams are session-scoped stdio children with injected credentials",
+      "description": "v1 upstream servers are operator-configured argv commands — no shell, ever — spawned per session on first use, speaking MCP over stdio. The child environment is minimal: PATH and HOME plus exactly the names listed in the server's env, valued from the mediator's own environment or credential mounts; credentials never appear in config, argv, or any protocol message. serve refuses to boot when a configured env name is unset (fail loud at boot, not at first call). Lifetime is the SSH connection: at session end every child is terminated (SIGTERM, bounded grace, SIGKILL) and reaped. A child that dies or times out marks its server failed for the session (operational errors, no respawn). HTTP transports and OAuth token management are out of scope for v1."
+    },
+    {
+      "type": "functional",
+      "title": "Mediator config: own file, own trust domain, gate-grade strict decode",
+      "description": "The mediator reads one strictly-decoded JSON config (not in repos.d — the surface is not per-repo and the mediator is a separate privilege domain): format_version (guarded, supported = 1), roles (fingerprint → role), servers {command argv, env names}, tools {server, upstream_name, description?, params}, tool_roles (the action_roles shape, default-deny), audit_log, limits {message_bytes, upstream_message_bytes, handshake_timeout, call_timeout — defaults 1 MiB, 8 MiB, 30s, 120s}. The full raw-key discipline applies (byte-exact top-level keys, duplicate-key refusal everywhere, lowercase schema keys with the data maps exempt, DisallowUnknownFields, trailing-content refusal). validate-config and serve-at-boot refuse fail-closed on every named problem."
+    },
+    {
+      "type": "functional",
+      "title": "Every decision audited through the existing trail",
+      "description": "Session admission (unknown fingerprint = deny before any protocol exchange), every tools/call (allow/deny/error with reason), and every refused method append one fsync'd JSON line via internal/audit to the mediator config's audit_log: kind mcp, fingerprint, role, tool-or-method as action, verdict, reason. Unset audit_log disables the trail; a write failure never changes a verdict — reported loudly."
+    },
+    {
+      "type": "functional",
+      "title": "Coupled release: one tag, two artifacts, one version",
+      "description": "cmd/portitor-mcp is a second build target sharing the internal packages. One tag ships both artifacts at one version through the existing pipeline and signing key — the shared config discipline makes lockstep the correct semantics. The release pipeline (goreleaser builds/archives, per-artifact checksums, manifest, install.sh, attestation) covers the second artifact; the manifest distinguishes artifacts by tool. Compatibility is additive (minor bump): rollout is binary-first, then config."
+    },
+    {
+      "type": "non-functional",
+      "title": "Pure evaluators, unit- and fuzz-tested beside the I/O",
+      "description": "The security-critical logic is pure and tested without processes or network: message routing (the closed method table), the schema matcher and its canonicalization invariant (accepted bytes re-decode to exactly the accepted field set), the advertisement pinning check, config parse/validate, list assembly, and the git-side classify extension (FuzzClassify gains the mcp row invariants). Protocol behavior is tested over in-process pipes via an injected transport; process supervision via a self-exec fake upstream."
+    }
+  ],
+  "components": [
+    {
+      "name": "McpDispatchRoute",
+      "description": "cmd/portitor: the classify() mcp row (exactly `portitor mcp`) and spliceMCP — mcpwire.ParseTarget (unix:/tcp: forms, pure, shared with the mediator's listener), dial, one JSON fingerprint header line, bidirectional copy with half-close; clean refusal when the target is unset or undialable.",
+      "content": "arch_mcp.md",
+      "implements": []
+    },
+    {
+      "name": "MediatorProtocolLoop",
+      "description": "cmd/portitor-mcp session handler: header admission (role from fingerprint, refused before any protocol exchange), the closed MCP method subset over newline-delimited JSON-RPC, sequential request handling, id remapping on the forward path, containment of server-initiated flows, and per-decision audit.",
+      "content": "arch_mcp.md",
+      "implements": []
+    },
+    {
+      "name": "SchemaMatcher",
+      "description": "internal/mcpschema: the minimal params grammar (Compile), strict validation with literal-level integer/enum checks (Validate → canonical bytes), the tools/list schema synthesis, and the bounded advertisement pinning check (CheckAdvertised). Pure; fuzzed on the canonicalization invariant.",
+      "content": "arch_mcp.md",
+      "implements": []
+    },
+    {
+      "name": "UpstreamSupervisor",
+      "description": "cmd/portitor-mcp: session-scoped stdio children — argv spawn (no shell), env allowlist injection, handshake + one-time tools/list advertisement capture, per-session failure latching, TERM/grace/KILL reap at session end; the client protocol runs over an injected transport for testability.",
+      "content": "arch_mcp.md",
+      "implements": []
+    },
+    {
+      "name": "MediatorConfig",
+      "description": "internal/mcpconfig: Settings, the gate-grade raw-key strict decode, Validate (fail-closed problem list), and the pure views RoleFor / Granted (default-deny) / ListTools (sorted, synthesized inputSchema).",
+      "content": "arch_mcp.md",
+      "implements": []
+    },
+    {
+      "name": "MediatorWire",
+      "description": "internal/mcpwire: JSON-RPC 2.0 message parse/build, capped newline framing, and Route — the pure closed method table the session loop dispatches on.",
+      "content": "arch_mcp.md",
+      "implements": []
+    }
+  ]
+}

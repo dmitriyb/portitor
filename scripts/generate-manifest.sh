@@ -28,13 +28,18 @@ while IFS= read -r entry; do
   format=$(jq -r '.extra.Format // "tar.gz"' <<<"$entry")
   sha256=$(sha256sum "$path" | cut -d' ' -f1)
   size_bytes=$(stat -c%s "$path")
+  # One release ships two tools (portitor + portitor-mcp), so a target alone
+  # no longer identifies an artifact — each entry names its tool, derived
+  # from the archive-name prefix ("<tool>_<version>_<os>_<arch>.tar.gz").
+  tool_name="${name%%_*}"
   artifact=$(jq -n \
     --arg name "$name" \
+    --arg tool "$tool_name" \
     --arg target "${goos}_${goarch}" \
     --arg sha256 "$sha256" \
     --argjson size_bytes "$size_bytes" \
     --arg archive_format "$format" \
-    '{name: $name, target: $target, sha256: $sha256, size_bytes: $size_bytes, archive_format: $archive_format}')
+    '{name: $name, tool: $tool, target: $target, sha256: $sha256, size_bytes: $size_bytes, archive_format: $archive_format}')
   artifacts=$(jq --argjson a "$artifact" '. + [$a]' <<<"$artifacts")
 done < <(jq -c '.[] | select(.type == "Archive")' "$artifacts_json")
 

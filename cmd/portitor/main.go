@@ -688,6 +688,13 @@ func shellCommand(args []string) int {
 		// after "portitor pr"; prRun re-derives the role from the target repo's
 		// config (per-repo role map).
 		return execSub(newPrCmd(func() string { return fp }), rest)
+	case "mcp":
+		// Splice, not exec: the MCP mediation runs in the separately running
+		// portitor-mcp process (its own user/container/credential set — it
+		// parses attacker-influenced JSON and must never hold the GitHub
+		// credential). This process only asserts the verified fingerprint and
+		// copies bytes (see spec/mcp/arch_mcp.md).
+		return spliceMCP(fp)
 	default:
 		fmt.Fprintln(os.Stderr, "portitor: command not allowed")
 		return 1
@@ -698,6 +705,7 @@ func shellCommand(args []string) int {
 // so the security-critical routing is unit-testable.
 //   - git-receive-pack/upload-pack '<path>'  -> ("git", [cmd, path])
 //   - portitor pr <action> ...               -> ("pr", [action, ...])
+//   - portitor mcp (exactly two tokens)      -> ("mcp", nil)
 //   - anything else                          -> ("reject", nil)
 func classify(orig string) (string, []string, error) {
 	if strings.TrimSpace(orig) == "" {
@@ -722,7 +730,13 @@ func classify(orig string) (string, []string, error) {
 		if len(toks) >= 2 && toks[1] == "pr" {
 			return "pr", toks[2:], nil
 		}
-		return "reject", nil, errors.New("only `portitor pr` is allowed")
+		// `portitor mcp` takes no arguments — the MCP conversation runs over
+		// stdio, so nothing an argument could carry is legitimate; trailing
+		// tokens are rejected (the narrowest surface wins).
+		if len(toks) == 2 && toks[1] == "mcp" {
+			return "mcp", nil, nil
+		}
+		return "reject", nil, errors.New("only `portitor pr` or `portitor mcp` is allowed")
 	}
 	return "reject", nil, fmt.Errorf("command %q not allowed", toks[0])
 }

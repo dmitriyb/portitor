@@ -24,13 +24,51 @@ builds:
     goarch:
       - amd64
       - arm64
+  # portitor-mcp is the MCP mediator: a second binary from the same module,
+  # shipped in lockstep — one tag stamps both with one version, so a version
+  # number states "this pair was tested together" (spec/mcp/arch_mcp.md).
+  - id: portitor-mcp
+    main: ./cmd/portitor-mcp
+    binary: portitor-mcp
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
 
 archives:
+  # Each archive pins its build id: without `ids`, an archive would bundle
+  # every build and the two binaries would ship interleaved.
   - id: portitor
+    ids:
+      - portitor
     formats:
       - tar.gz
     name_template: >-
       {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE
+  - id: portitor-mcp
+    ids:
+      - portitor-mcp
+    formats:
+      - tar.gz
+    name_template: >-
+      portitor-mcp_
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}

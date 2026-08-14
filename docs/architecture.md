@@ -18,6 +18,15 @@ This page is a summary; the authoritative, requirement-level specification is un
 - `spec/gate/arch_content_rules.md` — the structural/semantic content-rules schema and matcher vocabulary.
 - `spec/gate/arch_add_role.md` — how `add-role` binds a fingerprint to a role.
 - `spec/action/arch_action.md` — the `portitor shell` dispatch, the `pr` action API, and merge-precondition re-derivation.
+- `spec/mcp/arch_mcp.md` — the `portitor-mcp` mediator: shape-validated MCP forwarding over the same SSH channel.
+
+## Three enforcement tiers
+
+portitor's guarantees come in three named tiers, and every surface is documented as exactly the tier it delivers:
+
+1. **Result verification** (the git gate) — a verdict is a function of verified objects; the strongest tier.
+2. **Request mediation with re-derived authority** (the `pr` API) — the verb is tied to state the gate checks itself.
+3. **Shape-validated forwarding** (the MCP mediator) — only these tools, only these argument shapes, only this role, audited, credentials never leaving the mediator. MCP calls are imperative JSON-RPC: there is no artifact to verify and no managed state to tie a call to, so this is the egress allowlist's guarantee class lifted from host granularity to tool-call granularity — never gate-grade or `pr`-grade authority, and never presented as such.
 
 ## Guiding principle
 

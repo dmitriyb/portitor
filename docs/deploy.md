@@ -42,6 +42,15 @@ The agent clones and pushes over SSH (`ssh://git@portitor/srv/git/myrepo.git`); 
 On an accepted push, portitor forwards the branch upstream with its own credential and opens the PR, printing `PR #<n> <url>` back.
 See `commands.md` for the full command/action reference and `architecture.md` for how the gate decides.
 
+## 5. The MCP mediator (optional, its own container)
+
+`portitor-mcp` runs as a **second container/user** beside the git-side one — different process, different credential set: the mediator holds the MCP upstream tokens (its own env/credential mounts) and its own outbound egress for upstream APIs; the git-side container is unchanged and keeps sole custody of the GitHub credential, with no MCP token and no new egress.
+
+- Give the mediator its config file (see `configuration.md`) and start `portitor-mcp serve --config <path> --listen unix:<path>|tcp:<host>:<port>`; boot fails loudly on an invalid config or a configured-but-unset credential env name.
+- Point the git-side container at it with `PORTITOR_MCP_TARGET` (same `unix:`/`tcp:` form). The splice target's reachability is the trust boundary for the asserted caller fingerprint — confine it (socket permissions / network isolation) to the git-side dispatcher.
+- With no `PORTITOR_MCP_TARGET`, `portitor mcp` refuses cleanly and everything else is unaffected — roll out binary-first, then config.
+- The `--internal` network and the agent-side egress lock are declarative deploy config owned outside this repo, unchanged by the mediator.
+
 ## Live end-to-end proof
 
 `../deploy/DEPLOY.md` is a full runbook for a real run against the dca agent (dotfiles repo) and a real GitHub sandbox repo: role keys, a concrete config, container bring-up, mirroring, and a live agent push through to an opened PR.
