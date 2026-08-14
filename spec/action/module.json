@@ -35,7 +35,7 @@
     {
       "type": "functional",
       "title": "SSH forced-command dispatch (portitor shell)",
-      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND against a closed table: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs, with the caller fingerprint exported to the subprocess environment for audit attribution; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; everything else — including git-upload-archive — is rejected. One key thus grants gated git + the narrow action API and nothing more."
+      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND against a closed table: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs, with the caller fingerprint exported to the subprocess environment for audit attribution; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; `portitor mcp` (exactly two tokens) splices the connection's stdio to the portitor-mcp mediator with the fingerprint asserted in the splice header (the mcp module's surface, at its own weaker tier); everything else — including git-upload-archive — is rejected. One key thus grants gated git + the narrow action API + the shape-validated MCP splice and nothing more."
     },
     {
       "type": "non-functional",

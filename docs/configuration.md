@@ -186,6 +186,40 @@ The full matcher vocabulary and semantics are in `spec/gate/arch_content_rules.m
 To **restrict** a role to specific transitions, set `"default": "deny"` and add `allow` rules for what each role may do (e.g. implementer may only move `stage` from `draft` to `review`); fields no rule names are outside the protection surface.
 See `spec/gate/arch_content_rules.md` for the restrict pattern in full.
 
+## The MCP mediator's config (its own file, its own trust domain)
+
+`portitor-mcp` does **not** read `repos.d/`: the MCP surface is not per-repo, and the mediator is a separate privilege domain, so it reads one strictly-decoded JSON file of its own (`portitor-mcp serve --config <path>` / `$PORTITOR_MCP_CONFIG`), validated fail-closed at boot exactly like the gate's:
+
+```jsonc
+{
+  "format_version": 1,
+  // fingerprint → role, same shape as repos.d roles.
+  "roles": { "SHA256:…": "implementer" },
+  // Upstream MCP servers: argv (no shell) + env NAMES injected from the
+  // mediator's own environment. Credentials never appear in this file.
+  "servers": {
+    "tracker": { "command": ["tracker-mcp-server"], "env": ["TRACKER_TOKEN"] }
+  },
+  // The pinned tool list: exposed name → owning server, the name the upstream
+  // advertises, and the allowlist params schema (required/optional fields,
+  // primitive types, enum/const; unknown fields refused — ever).
+  "tools": {
+    "tracker.search": {
+      "server": "tracker",
+      "upstream_name": "search",
+      "params": { "fields": { "query": { "type": "string", "required": true } } }
+    }
+  },
+  // Which roles may call each tool — default-deny, the action_roles shape.
+  "tool_roles": { "tracker.search": ["implementer", "reviewer"] },
+  // Optional: the mediator's own JSONL audit trail + mechanism bounds.
+  "audit_log": "/var/log/portitor-mcp/audit.jsonl",
+  "limits": { "call_timeout": "120s" }
+}
+```
+
+The full schema, the exact matcher grammar, and the advertisement-pinning semantics are specified in `spec/mcp/arch_mcp.md`.
+
 ## Multi-repo registry
 
 One portitor mediates many repos — one config per repo under the registry dir:

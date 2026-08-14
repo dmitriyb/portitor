@@ -254,8 +254,8 @@ docs/deploy.md.`,
 func newShellCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "shell <fingerprint>",
-		Short:   "SSH forced command: dispatch to git-pack or the pr API",
-		Long:    "The SSH forced command (command=\"portitor shell <fingerprint>\"). It reads\nSSH_ORIGINAL_COMMAND, classifies the git command, and routes the connection to\neither the git pack commands or the role-gated pr action API — rejecting\neverything else.",
+		Short:   "SSH forced command: dispatch to git-pack, the pr API, or the MCP splice",
+		Long:    "The SSH forced command (command=\"portitor shell <fingerprint>\"). It reads\nSSH_ORIGINAL_COMMAND, classifies the git command, and routes the connection to\nthe git pack commands, the role-gated pr action API, or the portitor-mcp\nsplice — rejecting everything else.",
 		GroupID: cli.GroupAction,
 		// The forced-command argv is operator-controlled (command="portitor shell
 		// <fp>"); the connecting client's request arrives on SSH_ORIGINAL_COMMAND,

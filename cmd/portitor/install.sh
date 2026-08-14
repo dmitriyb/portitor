@@ -26,6 +26,7 @@
 #   sh install.sh                            install the latest release
 #   VERSION=v0.1.0 sh install.sh             install a specific release
 #   INSTALL_DIR=~/bin sh install.sh          install somewhere other than /usr/local/bin
+#   sh install.sh --tool portitor-mcp        install the MCP mediator binary instead
 #   sh install.sh --upgrade --target <path>  replace the binary at <path> in place
 #   sh install.sh --upgrade --target <path> --check     report current vs latest only
 #   sh install.sh --upgrade --target <path> --rollback  restore <path>.bak
@@ -39,7 +40,12 @@ OWNER="dmitriyb"
 REPO="portitor"
 
 # The tool/binary name, threaded through every runtime path and diagnostic
-# below so the installer names itself in exactly one place.
+# below so the installer names itself in exactly one place. One release ships
+# two tools from the same tag — the git-side gate (the default) and the MCP
+# mediator — selected by --tool; the value is validated against that closed
+# pair after flag parsing, and it changes only which same-named archive is
+# fetched: resolve, download, verify, and install run identically, against the
+# same release tag and the same signing key.
 TOOL="portitor"
 
 # The principal string used both here and in the README's allowed_signers
@@ -177,12 +183,21 @@ while [ $# -gt 0 ]; do
     --current=*) CURRENT="${1#--current=}" ;;
     --version) shift; VERSION="${1:-}" ;;
     --version=*) VERSION="${1#--version=}" ;;
+    --tool) shift; TOOL="${1:-}" ;;
+    --tool=*) TOOL="${1#--tool=}" ;;
     --) shift; break ;;
     -*) fail "unknown option: $1" ;;
     *) fail "unexpected argument: $1" ;;
   esac
   shift
 done
+
+# The released tool set is closed: anything else can never name a signed
+# artifact of this project, so it is refused before any network access.
+case "$TOOL" in
+  portitor | portitor-mcp) ;;
+  *) fail "unknown --tool: $TOOL (this project ships portitor and portitor-mcp)" ;;
+esac
 
 need curl
 need ssh-keygen

@@ -77,7 +77,7 @@ jobs:
         # per archive so a single binary can be verified without the rest.
         run: |
           cd dist
-          for f in portitor_*.tar.gz; do
+          for f in portitor_*.tar.gz portitor-mcp_*.tar.gz; do
             sha256sum "$f" > "$f.sha256"
           done
 
@@ -89,9 +89,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" dist/manifest.json dist/portitor_*.tar.gz.sha256 dist/install.sh dist/install.sh.sig --clobber
+          gh release upload "${GITHUB_REF_NAME}" dist/manifest.json dist/portitor_*.tar.gz.sha256 dist/portitor-mcp_*.tar.gz.sha256 dist/install.sh dist/install.sh.sig --clobber
 
       - name: Generate SLSA provenance attestation
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/portitor_*.tar.gz
+          subject-path: |
+            dist/portitor_*.tar.gz
+            dist/portitor-mcp_*.tar.gz

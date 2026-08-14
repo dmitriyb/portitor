@@ -33,12 +33,15 @@ func FuzzParseUpdates(f *testing.F) {
 
 // FuzzClassify (§5.4): classify never panics; kind "git" implies exactly
 // [cmd, path] with cmd in the closed pack-command table; kind "pr" implies the
-// original started with "portitor pr".
+// original started with "portitor pr"; kind "mcp" implies exactly `portitor
+// mcp` — no arguments survive to the splice.
 func FuzzClassify(f *testing.F) {
 	f.Add("git-receive-pack '/srv/git/r.git'")
 	f.Add("git-upload-pack '/srv/git/r.git'")
 	f.Add("git-upload-archive '/srv/git/r.git'")
 	f.Add("portitor pr merge --pr 5")
+	f.Add("portitor mcp")
+	f.Add("portitor mcp extra")
 	f.Add("rm -rf /")
 	f.Add("")
 	f.Fuzz(func(t *testing.T, orig string) {
@@ -57,6 +60,13 @@ func FuzzClassify(f *testing.F) {
 		case "pr":
 			if err != nil {
 				t.Fatalf("pr kind with error: %v", err)
+			}
+		case "mcp":
+			if err != nil {
+				t.Fatalf("mcp kind with error: %v", err)
+			}
+			if len(rest) != 0 {
+				t.Fatalf("mcp kind must carry no arguments, got %v", rest)
 			}
 		case "reject":
 			if err == nil {

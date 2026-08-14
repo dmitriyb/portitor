@@ -359,6 +359,9 @@ func TestClassify(t *testing.T) {
 		{"git-upload-archive '/srv/git/repo.git'", "reject", nil, false}, // deliberately outside the closed table
 		{"portitor pr comment --pr 5", "pr", []string{"comment", "--pr", "5"}, true},
 		{"portitor pr fetch --pr 7", "pr", []string{"fetch", "--pr", "7"}, true},
+		{"portitor mcp", "mcp", nil, true},
+		{"portitor mcp extra", "reject", nil, false},  // mcp takes no arguments
+		{"portitor mcp --flag", "reject", nil, false}, // not even flags
 		{"portitor shell deadbeef", "reject", nil, false},
 		{"rm -rf /", "reject", nil, false},
 		{"git-receive-pack a b", "reject", nil, false},

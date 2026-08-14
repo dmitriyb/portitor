@@ -16,7 +16,7 @@ import (
 // Event is one audit record. Zero-valued fields are omitted from the line.
 type Event struct {
 	Time        string   `json:"time"` // RFC3339, filled by Append when empty
-	Kind        string   `json:"kind"` // "gate" | "action" | "auto-pr"
+	Kind        string   `json:"kind"` // "gate" | "forward" | "action" | "auto-pr" | "mcp"
 	Repo        string   `json:"repo,omitempty"`
 	Fingerprint string   `json:"fingerprint,omitempty"`
 	Role        string   `json:"role,omitempty"`
