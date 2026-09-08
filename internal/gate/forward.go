@@ -1,7 +1,9 @@
 package gate
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/dmitriyb/portitor/internal/git"
@@ -35,6 +37,10 @@ const (
 	StatusSkippedNonBranch ForwardStatus = "skipped-non-branch"
 	// StatusSkippedDeletion — a deletion (not forwarded in this version).
 	StatusSkippedDeletion ForwardStatus = "skipped-deletion"
+	// StatusSkippedNoUpstream — the receiving repo has no remote by the
+	// configured upstream name (a gate provisioned without --upstream). There
+	// is nowhere to forward to, so this is a reported skip, not a failure.
+	StatusSkippedNoUpstream ForwardStatus = "skipped-no-upstream"
 	// StatusFailed — the push failed and upstream does not contain the tip.
 	StatusFailed ForwardStatus = "failed"
 )
@@ -73,6 +79,10 @@ func Forward(repoDir string, updates []RefUpdate, cfg ForwardConfig) ([]ForwardR
 	if !git.ValidRemoteName(remote) {
 		return nil, fmt.Errorf("invalid upstream remote name %q", remote)
 	}
+	hasUpstream, err := remoteConfigured(repoDir, remote)
+	if err != nil {
+		return nil, err
+	}
 
 	var results []ForwardResult
 	for _, u := range updates {
@@ -88,6 +98,10 @@ func Forward(repoDir string, updates []RefUpdate, cfg ForwardConfig) ([]ForwardR
 			results = append(results, ForwardResult{Ref: u.Ref, Status: StatusSkippedDefault})
 			continue
 		}
+		if !hasUpstream {
+			results = append(results, ForwardResult{Ref: u.Ref, Status: StatusSkippedNoUpstream})
+			continue
+		}
 		if !ValidSHA(u.NewSHA) {
 			results = append(results, ForwardResult{Ref: u.Ref, Status: StatusFailed, Err: fmt.Errorf("malformed new object id %q", u.NewSHA)})
 			continue
@@ -95,6 +109,22 @@ func Forward(repoDir string, updates []RefUpdate, cfg ForwardConfig) ([]ForwardR
 		results = append(results, forwardOne(repoDir, remote, u))
 	}
 	return results, nil
+}
+
+// remoteConfigured reports whether the receiving repo has a remote named
+// remote. Only the definite "key unset" answer (git config exit 1) counts as
+// absent; any other failure is an error, so a broken repo config can never
+// turn into a silent skip of forwarding.
+func remoteConfigured(repoDir, remote string) (bool, error) {
+	_, err := git.OutputHermetic(repoDir, "config", "--get", "remote."+remote+".url")
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("check upstream remote %q: %w", remote, err)
 }
 
 // forwardOne pushes a single ref, resolving a rejected push against whether the
@@ -201,6 +231,10 @@ func Reconcile(repoDir string, cfg ForwardConfig) ([]ForwardResult, error) {
 	if !git.ValidRemoteName(remote) {
 		return nil, fmt.Errorf("invalid upstream remote name %q", remote)
 	}
+	hasUpstream, err := remoteConfigured(repoDir, remote)
+	if err != nil {
+		return nil, err
+	}
 	branches, err := LocalBranches(repoDir)
 	if err != nil {
 		return nil, err
@@ -211,6 +245,10 @@ func Reconcile(repoDir string, cfg ForwardConfig) ([]ForwardResult, error) {
 	for ref, tip := range branches {
 		if ref == defRef {
 			continue // the default is upstream/owner territory
+		}
+		if !hasUpstream {
+			results = append(results, ForwardResult{Ref: ref, Status: StatusSkippedNoUpstream})
+			continue
 		}
 		remoteTip, err := upstreamRefTip(repoDir, remote, ref)
 		if err != nil {

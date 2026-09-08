@@ -2,7 +2,7 @@
 
 Two different things get built or installed differently — keep them separate:
 
-- **The `portitor` CLI/binary** is a **release artifact**: install it from the GitHub Releases page, verified, per the README's install section — it is the same binary the container image runs internally, plus it is useful standalone on an operator's own machine for `add-role`, `validate-config`, and `reconcile` against a mounted or copied registry.
+- **The `portitor` CLI/binary** is a **release artifact**: install it from the GitHub Releases page, verified, per [`install.md`](install.md) — it is the same binary the container image runs internally, plus it is useful standalone on an operator's own machine for `add-role`, `validate-config`, and `reconcile` against a mounted or copied registry.
 - **The container image** (gate + egress, built from the repository `Dockerfile`) is **not** a release artifact and is **not distributed**: the operator builds it locally, from the tagged source, with `docker build -t portitor .`, which keeps the image's provenance identical to "whatever is in this checkout" rather than adding a second signed-artifact surface to maintain.
 
 ## 1. Registry: per-repo config + role keys

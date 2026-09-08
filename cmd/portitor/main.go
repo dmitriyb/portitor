@@ -239,6 +239,9 @@ func postReceive(r io.Reader, w io.Writer) int {
 			fmt.Fprintf(w, "portitor: forward %s -> upstream FAILED: %v (recover with: portitor reconcile --repo <name>)\n", res.Ref, res.Err)
 			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "error", Reason: res.Err.Error()})
 			rc = 1
+		case gate.StatusSkippedNoUpstream:
+			fmt.Fprintf(w, "portitor: %s accepted, not forwarded (no upstream remote %q in this repo)\n", res.Ref, upstreamRemote(s))
+			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: string(res.Status)})
 		default: // skipped-default / skipped-non-branch / skipped-deletion
 			fmt.Fprintf(w, "portitor: %s not forwarded (%s)\n", res.Ref, res.Status)
 			auditEvent(w, audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: string(res.Status)})
@@ -297,6 +300,9 @@ func reconcileRun(repo string) int {
 		case gate.StatusAlreadyUpstream:
 			fmt.Printf("reconcile: %s already upstream\n", res.Ref)
 			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: "already-upstream"})
+		case gate.StatusSkippedNoUpstream:
+			fmt.Printf("reconcile: %s not forwarded (no upstream remote %q in this repo)\n", res.Ref, upstreamRemote(s))
+			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "skip", Reason: string(res.Status)})
 		case gate.StatusFailed:
 			fmt.Fprintf(os.Stderr, "reconcile: %s FAILED: %v\n", res.Ref, res.Err)
 			auditEvent(audit.Event{Kind: "forward", Refs: []string{res.Ref}, Verdict: "error", Reason: res.Err.Error()})

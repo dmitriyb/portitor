@@ -182,3 +182,48 @@ func TestReconcile(t *testing.T) {
 		t.Fatal("stranded should now exist upstream")
 	}
 }
+
+// TestForwardNoUpstream: a gate provisioned without an upstream (init-repo
+// with no --upstream) has nowhere to forward to. Forward and Reconcile must
+// report that as a skip per ref, never as a failed push.
+func TestForwardNoUpstream(t *testing.T) {
+	requireBins(t, "git", "ssh-keygen")
+	e := newTestEnv(t)
+	base := e.commitFile("README.md", "base")
+	e.push("main")
+	e.checkout("-b", "feature")
+	feat := e.commitFile("a.txt", "a")
+	e.push("feature")
+
+	cfg := ForwardConfig{UpstreamRemote: "upstream", DefaultBranch: "main"}
+
+	t.Run("forward reports skipped-no-upstream", func(t *testing.T) {
+		results, err := Forward(e.bare, []RefUpdate{{OldSHA: base, NewSHA: feat, Ref: "refs/heads/feature"}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || results[0].Status != StatusSkippedNoUpstream || results[0].Err != nil {
+			t.Fatalf("forward results = %+v", results)
+		}
+	})
+
+	t.Run("reconcile reports skipped-no-upstream", func(t *testing.T) {
+		results, err := Reconcile(e.bare, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || results[0].Ref != "refs/heads/feature" || results[0].Status != StatusSkippedNoUpstream {
+			t.Fatalf("reconcile results = %+v", results)
+		}
+	})
+
+	t.Run("default branch still reported skipped-default", func(t *testing.T) {
+		results, err := Forward(e.bare, []RefUpdate{{OldSHA: base, NewSHA: feat, Ref: "refs/heads/main"}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 || results[0].Status != StatusSkippedDefault {
+			t.Fatalf("forward results = %+v", results)
+		}
+	})
+}

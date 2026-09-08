@@ -18,7 +18,7 @@
 | `portitor-mcp validate-config [--config <path>]` | operator / boot | fail fast on a missing/invalid mediator config |
 | `portitor-mcp version` / `--version` / `-v` | anyone | print version, commit, and build date |
 
-Every `portitor` command above ships in the single released `portitor` binary (see the README's install section) — the same binary the container image runs. `portitor-mcp` is a second released binary from the same tag and version (one tag ships the tested pair); it runs in its own container/user with its own credentials — see `deploy.md`.
+Every `portitor` command above ships in the single released `portitor` binary (see [`install.md`](install.md)) — the same binary the container image runs. `portitor-mcp` is a second released binary from the same tag and version (one tag ships the tested pair); it runs in its own container/user with its own credentials — see `deploy.md`.
 `add-role`, `validate-config`, and `reconcile` are also useful run standalone from an operator's own machine, outside the container, against a mounted or copied registry.
 
 Prefer `add-role` over hand-editing the `roles` map: it validates the fingerprint, upserts atomically under a lock, optionally trusts a signing key in `allowed_signers` (deduped), and re-validates — so a fat-fingered key or a half-written file can't quietly weaken the gate.

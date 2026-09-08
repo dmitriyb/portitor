@@ -53,9 +53,11 @@ func TestEndToEndRealPush(t *testing.T) {
 	// Bare "server" with the real pre-receive hook installed.
 	bare := filepath.Join(dir, "bare.git")
 	mustRun(t, "git", "init", "-q", "--bare", "--initial-branch=main", bare)
-	shim := "#!/bin/sh\nexport PORTITOR_CONFIG=" + shellQuote(cfg) + "\nexec " + shellQuote(bin) + " pre-receive\n"
-	if err := os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte(shim), 0o755); err != nil {
-		t.Fatal(err)
+	for _, hook := range []string{"pre-receive", "post-receive"} {
+		shim := "#!/bin/sh\nexport PORTITOR_CONFIG=" + shellQuote(cfg) + "\nexec " + shellQuote(bin) + " " + hook + "\n"
+		if err := os.WriteFile(filepath.Join(bare, "hooks", hook), []byte(shim), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Work repo signing with the trusted key.
@@ -103,6 +105,10 @@ func TestEndToEndRealPush(t *testing.T) {
 		out, err := push("feature")
 		if err != nil {
 			t.Fatalf("signed feature push should be accepted:\n%s", out)
+		}
+		// No upstream remote: post-receive reports a skip, never a failed forward.
+		if !strings.Contains(out, "not forwarded (no upstream remote") || strings.Contains(out, "FAILED") {
+			t.Fatalf("expected a no-upstream skip in remote output:\n%s", out)
 		}
 	})
 
