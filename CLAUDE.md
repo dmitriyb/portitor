@@ -20,15 +20,15 @@ portitor is **mechanism, not policy**: identity is a signer-key fingerprint mapp
 
 Go packages live under `internal/` (`gate`, `rules`, `check`, `config`, `git`, `action`, `audit`, `mcpconfig`, `mcpschema`, `mcpwire`) with the two binaries in `cmd/portitor` and `cmd/portitor-mcp`.
 
-## Spec Convention (spexmachina)
+## Spec Convention (spexmachina format, hand-authored seeds)
 
-The spec is a typed graph managed by [spexmachina](https://github.com/dmitriyb/spexmachina):
+The spec is written in the [spexmachina](https://github.com/dmitriyb/spexmachina) format but is not yet run through `spex`: there is no `spec/project.json`, and the identity hashes (`id`, `preq_id`, `spec_node_id`) are intentionally absent from the seeds. `spex validate` does not apply until the seeds are formalized (see `spec/README.md`).
 
-- `spec/<module>/module.json`: module requirements, components, impl and test sections
-- `spec/<module>/{arch,impl,flow,test}_*.md`: content leaves referenced from `module.json`
 - `spec/proposals/YYYY-MM-DD-*.md`: every change starts with a proposal; `spec/reviews/` holds review records
+- `spec/<module>/module.json`: module requirements and components, hand-authored
+- `spec/<module>/{arch,impl,flow,test}_*.md`: content leaves referenced from `module.json`
 
-Validate with `spex validate`; a change session must end with `spex diff --json` reporting `errors: []`.
+A code change that alters gate behaviour updates the matching `arch_*.md` and the requirement text in `module.json` in the same PR.
 
 ## Technical Constraints
 
