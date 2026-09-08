@@ -122,12 +122,12 @@ git push ../demo.git HEAD:refs/heads/feature
 ```
 
 ```
-remote: portitor: forward refs/heads/feature -> upstream FAILED: ... 'upstream' does not appear to be a git repository ...
+remote: portitor: refs/heads/feature accepted, not forwarded (no upstream remote "upstream" in this repo)
 To ../demo.git
  * [new branch]      HEAD -> feature
 ```
 
-The gate accepted the branch. The `remote:` line is the forwarding step reporting that this demo repo has no upstream to forward to; with `--upstream` set, that line becomes `forwarded refs/heads/feature -> upstream` followed by the PR number.
+The gate accepted the branch. With `--upstream` set on `init-repo`, the same line reads `forwarded refs/heads/feature -> upstream`, followed by the PR number.
 
 Now an unsigned commit, and a push straight to the default branch:
 

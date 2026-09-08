@@ -187,6 +187,10 @@ status:
   change **between** pre- and post-receive cannot silently drop an accepted ref (the earlier
   fail-open where Forward exited 0 with no output).
 - `skipped-non-branch` / `skipped-deletion` — a non-`refs/heads` ref or a deletion.
+- `skipped-no-upstream` — the receiving repo has no remote by the configured upstream name (a gate
+  provisioned without `--upstream`). Nowhere to forward to is a reported skip, not a failure, and
+  no PR is opened; `reconcile` reports the same. Only git's definite "unset" answer counts as
+  absent — any other error reading the remote fails the forward loudly.
 - `failed` — the push failed and upstream does not contain the tip; post-receive exits non-zero
   and points the operator at `portitor reconcile`.
 

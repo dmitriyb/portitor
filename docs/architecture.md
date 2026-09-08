@@ -7,7 +7,7 @@ The gate (`pre-receive`) inspects the objects being landed, delegating the crypt
 - **Committer email allowlist** (opt-in). When `allowed_committer_emails` is set, each introduced commit's `%ce` must be listed (byte-exact), independent of the signature verdict.
 - **Branch namespace only.** Only `refs/heads/<name>` is accepted; the default branch is never a push target; other namespaces (tags, notes, `refs/replace/*`) are refused.
 - **Content rules** gate file operations and record transitions by role (see `configuration.md`).
-- **Forwarding** (`post-receive`) mirrors accepted feature branches upstream and auto-opens the PR, reporting every ref's outcome (an out-of-order forward whose tip upstream already contains is success); `reconcile` recovers a failed one.
+- **Forwarding** (`post-receive`) mirrors accepted feature branches upstream and auto-opens the PR, reporting every ref's outcome (an out-of-order forward whose tip upstream already contains is success; a repo provisioned without an upstream reports a skip, not a failure); `reconcile` recovers a failed one.
 - **Audit** appends a durable, fsync'd decision trail (never altering a verdict).
 
 The mechanism is pure and unit-/fuzz-tested.
