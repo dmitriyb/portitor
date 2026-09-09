@@ -1,13 +1,18 @@
 # portitor
 
-**A self-hosted git gateway between an untrusted agent and your upstream.**
+*A self-hosted git gateway between an untrusted agent and your upstream.*
 
-[![Release](https://img.shields.io/github/v/release/dmitriyb/portitor)](https://github.com/dmitriyb/portitor/releases)
-[![Go](https://img.shields.io/github/go-mod/go-version/dmitriyb/portitor)](go.mod)
-[![License](https://img.shields.io/github/license/dmitriyb/portitor)](LICENSE)
-[![CI](https://github.com/dmitriyb/portitor/actions/workflows/ci.yml/badge.svg)](https://github.com/dmitriyb/portitor/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/dmitriyb/portitor)](https://github.com/dmitriyb/portitor/releases)
+[![go](https://img.shields.io/github/go-mod/go-version/dmitriyb/portitor)](go.mod)
+[![license](https://img.shields.io/github/license/dmitriyb/portitor)](LICENSE)
+[![ci](https://github.com/dmitriyb/portitor/actions/workflows/ci.yml/badge.svg)](https://github.com/dmitriyb/portitor/actions/workflows/ci.yml)
 
-<!-- recording placeholder: the local gate demo from Quick start, signed push accepted, unsigned push refused -->
+<!-- terminal recording: the local gate demo from Quick start, a signed push accepted, an unsigned push refused. Placeholder until recorded. -->
+
+`portitor` is the hard enforcement boundary for an agent that works unattended.
+It judges the result of a push, not the commands that produced it, and it is the
+only component that holds a credential for the upstream. Its only runtime
+dependency is git.
 
 ```
 agent ──ssh──▶ portitor ──┬─ git gate (pre-receive): signed? role? branch? content rules
@@ -17,9 +22,6 @@ agent ──ssh──▶ portitor ──┬─ git gate (pre-receive): signed? r
                                                        (the ONLY GitHub credential lives here)
 ```
 
-portitor is the hard enforcement boundary for an agent that works unattended: it judges the **result** of a push, not the commands that produced it, and it is the only component that holds a credential for the upstream.
-Its only runtime dependency is git.
-
 ## What it does
 
 - **Verifies the result of a push.** A `pre-receive` hook inspects the objects being landed: every introduced commit must be signed by a trusted key, only branch refs are accepted, and the default branch is never a push target. Any internal error rejects the push.
@@ -28,13 +30,11 @@ Its only runtime dependency is git.
 - **Forwards accepted branches and opens the PR.** A `post-receive` hook mirrors an accepted feature branch upstream with portitor's credential and opens a pull request for it.
 - **Exposes a role-gated action API.** `portitor pr` runs comment, review, merge, close, checks and similar actions after a default-deny role check; merge preconditions are re-derived from upstream state, never taken from the request.
 
-Every domain name (roles, protected paths, record fields, the record-extraction command) is configuration; portitor ships none.
-See [`docs/architecture.md`](docs/architecture.md) for the full model.
+Every domain name (roles, protected paths, record fields, the record-extraction command) is configuration; portitor ships none. See [`docs/architecture.md`](docs/architecture.md).
 
 ## Install
 
-The `portitor` binary is published on the [GitHub Releases page](https://github.com/dmitriyb/portitor/releases) for linux/darwin, amd64/arm64.
-The install script is verified against the release signing key before it runs, and the script verifies the binary the same way.
+Download the install script, verify it, then run it. Never `curl | sh`: a piped script cannot verify itself before it runs. The container image (gate + egress) is not a release artifact: build it from this repository's `Dockerfile` with `docker build -t portitor .`. Details, other shells and the trust model are in [`docs/install.md`](docs/install.md).
 
 ```bash
 curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh     -o install.sh \
@@ -45,119 +45,49 @@ curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install
 && rm -f install.sh install.sh.sig
 ```
 
-<details>
-<summary>fish</summary>
+Public key, pin it once:
 
-```fish
-curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh -o install.sh
-and curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh.sig -o install.sh.sig
-and ssh-keygen -Y verify -f (printf 'dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing\n' | psub) -I dvbozhko@gmail.com -n file -s install.sh.sig < install.sh
-and sh install.sh
-and rm -f install.sh install.sh.sig
+```
+dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing
 ```
 
-</details>
-
 <details>
-<summary>plain sh (no process substitution)</summary>
+<summary>fish, plain sh, verifying the archive directly, upgrading</summary>
 
-```sh
-printf 'dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing\n' > allowed_signers
-ssh-keygen -Y verify -f allowed_signers -I dvbozhko@gmail.com -n file -s install.sh.sig < install.sh
-sh install.sh
-```
+- **fish** and **plain `sh`** variants of the block above: [`docs/install.md`](docs/install.md#primary-verified-install-script).
+- **Maximal**: skip the script and verify the release archive itself by SSHSIG, SLSA attestation or the Go checksum database: [`docs/install.md`](docs/install.md#maximal-verify-the-binary-archive-directly).
+- **Upgrading**: `portitor upgrade` runs the same signed installer against its own path, forward-only; `--check`, `--version`, `--rollback`: [`docs/install.md`](docs/install.md#upgrading).
 
 </details>
-
-<details>
-<summary>maximal: verify the archive directly, no script</summary>
-
-```bash
-ssh-keygen -Y verify -f allowed_signers -I dvbozhko@gmail.com -n file \
-  -s portitor_<version>_<os>_<arch>.tar.gz.sig < portitor_<version>_<os>_<arch>.tar.gz
-gh attestation verify portitor_<version>_<os>_<arch>.tar.gz --repo dmitriyb/portitor
-go install github.com/dmitriyb/portitor/cmd/portitor@<tag>
-```
-
-</details>
-
-<details>
-<summary>upgrading</summary>
-
-`portitor upgrade` updates the installed binary in place through the same signed installer. It is forward-only and refuses a "latest" that is older than the installed version; `--version vX.Y.Z` installs an exact release, `--rollback` restores the previous binary.
-
-</details>
-
-The container image (gate + egress) is not a release artifact: build it from this repository's `Dockerfile` with `docker build -t portitor .`.
-The public key, what each channel protects, and the residual risks are in [`docs/install.md`](docs/install.md).
 
 ## Quick start
 
-Part 1 needs git, ssh-keygen and the `portitor` binary on `PATH`. No container, no GitHub, no network.
+Needs git, ssh-keygen and `portitor` on `PATH`. No container, no GitHub, no network.
 
-Operator side: one signing key, a config that binds its fingerprint to a role, and a gated bare repo.
-
-```bash
+```sh
 mkdir demo && cd demo
-ssh-keygen -q -t ed25519 -N '' -C implementer -f implementer
+ssh-keygen -q -t ed25519 -N '' -C implementer -f implementer      # the one signing key
 mkdir repos.d
 echo "implementer namespaces=\"git\" $(cut -d' ' -f1,2 implementer.pub)" > allowed_signers
 FP=$(ssh-keygen -lf implementer.pub | cut -d' ' -f2)
 printf '{"format_version":1,"default_branch":"main","allowed_signers":"%s","roles":{"%s":"implementer"}}\n' "$PWD/allowed_signers" "$FP" > repos.d/demo.json
-portitor validate-config --config repos.d/demo.json
-portitor init-repo --bare demo.git --config "$PWD/repos.d/demo.json"
-```
+portitor validate-config --config repos.d/demo.json               # fingerprint -> role, bound in config
+portitor init-repo --bare demo.git --config "$PWD/repos.d/demo.json"   # the gated bare repo
 
-Agent side: a work repo that signs with that key, and a signed push of a feature branch.
-
-```bash
-git init -q -b main work && cd work
+git init -q -b main work && cd work                               # the agent side: a repo that signs with that key
 git config user.name implementer
 git config user.email implementer@example.com
 git config gpg.format ssh
 git config user.signingkey ../implementer
 git config commit.gpgsign true
 echo hello > hello.txt && git add hello.txt && git commit -q -m "add hello"
-git push ../demo.git HEAD:refs/heads/feature
-```
-
-```
-remote: portitor: refs/heads/feature accepted, not forwarded (no upstream remote "upstream" in this repo)
-To ../demo.git
- * [new branch]      HEAD -> feature
-```
-
-The gate accepted the branch. With `--upstream` set on `init-repo`, the same line reads `forwarded refs/heads/feature -> upstream`, followed by the PR number.
-
-Now an unsigned commit, and a push straight to the default branch:
-
-```bash
+git push ../demo.git HEAD:refs/heads/feature                      # accepted: signed, feature branch
 echo unsigned > unsigned.txt && git add unsigned.txt && git commit -q --no-gpg-sign -m "add unsigned"
-git push ../demo.git HEAD:refs/heads/feature-unsigned
-git push ../demo.git HEAD~1:refs/heads/main
+git push ../demo.git HEAD:refs/heads/feature-unsigned             # rejected: unsigned-or-untrusted-commit
+git push ../demo.git HEAD~1:refs/heads/main                       # rejected: no-push-to-default
 ```
 
-```
-remote: portitor: push rejected
-remote:   [unsigned-or-untrusted-commit] refs/heads/feature-unsigned: commit 2c6130b62b63 is not signed by an allowed signer (no signature)
- ! [remote rejected] HEAD -> feature-unsigned (pre-receive hook declined)
-
-remote: portitor: push rejected
-remote:   [no-push-to-default] refs/heads/main: push to the default branch "main" is not allowed — use a feature branch and open a PR
- ! [remote rejected] HEAD~1 -> main (pre-receive hook declined)
-```
-
-Part 2 is the deployed shape: the gate in a container, the agent reaching it over SSH, an upstream on GitHub.
-
-```bash
-docker build -t portitor .
-deploy/run.sh --config-dir ./portitor-config --keys ./implementer.pub
-docker exec -u git portitor portitor add-repo --repo myrepo --upstream https://github.com/you/myrepo.git
-docker exec -u git portitor portitor add-role --repo myrepo --role implementer --fingerprint SHA256:… --pub ./implementer.pub
-```
-
-The agent then clones and pushes `ssh://git@portitor/srv/git/myrepo.git`; an accepted branch is forwarded and its PR number printed back over the push.
-Registry layout, the PAT source, and network attachment are in [`docs/deploy.md`](docs/deploy.md).
+That is the gate in one sitting: a signed commit on a feature branch lands, an unsigned one is refused by name, and a push to the default branch is refused whatever it carries. With `--upstream` set on `init-repo`, an accepted branch is forwarded and its PR number is printed back over the push. The deployed shape, the gate in a container reached over SSH with an upstream on GitHub, is four commands in [`docs/deploy.md`](docs/deploy.md): `docker build`, `deploy/run.sh`, `add-repo`, `add-role`.
 
 ## How it compares
 
@@ -172,14 +102,14 @@ The argument in one line: trust the gate, not the agent. A tricked agent, a bugg
 
 ## Learn more
 
-- [`docs/deploy.md`](docs/deploy.md): registry, container bring-up, provisioning, the MCP mediator.
-- [`docs/configuration.md`](docs/configuration.md): the per-repo config schema, `allowed_signers`, content rules, the multi-repo registry.
-- [`docs/commands.md`](docs/commands.md): the full command reference and the `pr` action API.
-- [`docs/architecture.md`](docs/architecture.md): how the gate decides, the three enforcement tiers, links to the spec.
-- [`docs/install.md`](docs/install.md): every install channel, the public key, upgrading.
-- [`deploy/DEPLOY.md`](deploy/DEPLOY.md): a live end-to-end runbook against a real GitHub sandbox.
-- `spec/**`: the authoritative, requirement-level specification (spexmachina format).
+- [`docs/deploy.md`](docs/deploy.md) — registry, container bring-up, provisioning, the MCP mediator.
+- [`docs/configuration.md`](docs/configuration.md) — the per-repo config schema, `allowed_signers`, content rules, the multi-repo registry.
+- [`docs/commands.md`](docs/commands.md) — the full command reference and the `pr` action API.
+- [`docs/architecture.md`](docs/architecture.md) — how the gate decides, the three enforcement tiers, links to the spec.
+- [`docs/install.md`](docs/install.md) — every install channel, the public key, upgrading.
+- [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — a live end-to-end runbook against a real GitHub sandbox.
+- `spec/**` — the authoritative, requirement-level specification (spexmachina format).
 
 ## License
 
-Apache-2.0 (see `LICENSE`).
+Apache-2.0, see [`LICENSE`](LICENSE).

@@ -1,9 +1,22 @@
 # Installing portitor
 
-The `portitor` binary — the same binary the container image runs, also useful standalone for `add-role`/`validate-config`/`reconcile` from an operator's machine — is published on the [GitHub Releases page][releases] for linux/darwin, amd64/arm64.
-Every release archive is signed with SSHSIG (`ssh-keygen -Y sign`), verifiable with the `ssh-keygen` that already ships with OpenSSH on essentially every machine — no extra tool to install just to verify.
+One binary is published on the [GitHub Releases page][releases]: `portitor`
+(linux/darwin, amd64/arm64). It is the same binary the container image runs,
+and it is useful standalone on an operator's machine for `add-role`,
+`validate-config` and `reconcile`. The container image (gate + egress) is
+**not** a release artifact: build it from this repository's `Dockerfile` with
+`docker build -t portitor .`, see [`deploy.md`](deploy.md). Every release
+archive is signed with SSHSIG (`ssh-keygen -Y sign`), verifiable with the
+`ssh-keygen` that ships with OpenSSH — no extra tool to install just to verify.
 
 [releases]: https://github.com/dmitriyb/portitor/releases
+
+## Why not `curl | sh`
+
+A piped script executes as it streams and cannot verify itself before it
+runs. Verification therefore has to wrap the download from outside the
+stream: download the script, verify the script, then run it. That is the
+whole reason the primary path is three commands rather than one pipe.
 
 ## Primary: verified install script
 
@@ -28,21 +41,28 @@ and sh install.sh
 and rm -f install.sh install.sh.sig
 ```
 
-This downloads `install.sh`, verifies **the script itself** against the public key below, and only then runs it — never `curl | sh`.
-`install.sh` then resolves the latest release, detects your OS/arch, downloads the matching binary archive and its signature, and verifies the **binary** with the same key (embedded in the script, trusted because the script was just verified) before installing it.
-Set `VERSION=v0.1.0` before the final `sh install.sh` to install a specific release instead of the latest.
-
-The block above needs bash or zsh (`<(…)` process substitution).
-Under a plain `sh`, write the allowed-signers line to a file first:
+**plain `sh`** (no `<(…)` process substitution): write the allowed-signers
+line to a file first, then verify against it.
 
 ```sh
 printf 'dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing\n' > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I dvbozhko@gmail.com -n file -s install.sh.sig < install.sh
 ```
 
+The block verifies **the script itself** against the public key below and
+only then runs it. `install.sh` resolves the latest release, detects your
+OS/arch, downloads the matching `portitor` archive and its signature, and
+verifies the **binary** with the same key (embedded in the script, trusted
+because the script was just verified) before installing it.
+
+The script is POSIX `sh`. Set `VERSION=v0.1.0` before `sh install.sh` to
+install a specific release, and `INSTALL_DIR=DIR` to choose the install
+directory (default `/usr/local/bin`).
+
 ## Maximal: verify the binary archive directly
 
-No install script — download the archive for your platform from the [Releases page][releases], then verify it by any one of:
+No install script — download the archive for your platform from the
+[Releases page][releases], then verify it by any one of:
 
 ```bash
 # SSHSIG, against the same pinned key as above
@@ -56,14 +76,26 @@ gh attestation verify portitor_<version>_<os>_<arch>.tar.gz --repo dmitriyb/port
 go install github.com/dmitriyb/portitor/cmd/portitor@<tag>
 ```
 
-Each release also carries a consolidated `checksums.txt`, one `.sha256` per archive, and a machine-readable `manifest.json` (schema, target, sha256, size per artifact).
+Each release also carries a consolidated `checksums.txt`, one `.sha256` per
+archive, and a machine-readable `manifest.json` (schema, target, sha256, size
+per artifact).
 
 ## What each channel protects, and what it doesn't
 
-- **Primary** verifies both the install script and the binary it fetches, end to end — `download → verify → run`, never a piped script: a piped `curl … | sh` executes as it streams and cannot verify itself before running, so verification has to wrap the download from outside the stream, which is exactly why the primary path is not a one-liner pipe.
-- **Maximal** gives you the strongest per-artifact check for a single file, with no script in between.
-- The trust anchor in both cases is the public key **copied from this document** — that defeats tampering of the download in transit; the residual risk is being sent to a look-alike or phishing copy of this repository, closed by using the known repository URL and by pinning the public key **once** — copy it a single time, then verify every future release against that pinned copy rather than re-copying it from wherever you happen to land.
-- Signatures and attestations give **authenticity, not freshness**: a channel attacker who can intercept your download could still steer you to a genuine-but-older, vulnerable release (a downgrade); this applies to every channel above equally at *first install*, where there is no installed version to floor against — note it as a residual risk rather than a solved one. For *updates* this is closed: `portitor upgrade` is forward-only and hard-refuses (non-overridably) a resolved latest that is older than what is installed (see Upgrading).
+- **Primary** verifies both the install script and the binary it fetches,
+  end to end: `download → verify → run`, never a piped script.
+- **Maximal** gives the strongest per-artifact check for a single file, with
+  no script in between.
+- The trust anchor in both cases is the public key **copied from this page**.
+  That defeats tampering in transit; the residual risk is a look-alike copy
+  of this repository, closed by using the known repository URL and by pinning
+  the key **once** — copy it a single time, then verify every future release
+  against that pinned copy.
+- Signatures and attestations give **authenticity, not freshness**: an
+  attacker who can intercept a download could still steer a *first install*
+  to a genuine-but-older release. For *updates* this is closed: `portitor upgrade`
+  is forward-only and hard-refuses a resolved latest older than what is
+  installed.
 
 ## Public key
 
@@ -71,16 +103,28 @@ Each release also carries a consolidated `checksums.txt`, one `.sha256` per arch
 dvbozhko@gmail.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIhmCWVDP/Tcm3CqXNjTQTChbKxr223xMob9zc56Uuny release signing
 ```
 
-This is the same key across all three verification paths above (SSHSIG install script, SSHSIG archive, and the `allowed_signers` line either way).
-It can also be pinned and cross-checked against GitHub's own copy at `https://api.github.com/users/dmitriyb/ssh_signing_keys`, once it is added under Settings → SSH and GPG keys → Signing keys — useful if this document itself is ever suspected of being tampered with in a fork or mirror.
-
-The container image (gate + egress) is **not** a release artifact: it is built locally by the operator from this repository's `Dockerfile` (`docker build -t portitor .`).
-See `deploy.md` for the CLI-vs-image split in full.
+The same key serves all three verification paths above, and the same line
+is published by portitor's sibling tools, [faber](https://github.com/dmitriyb/faber)
+and [spexmachina](https://github.com/dmitriyb/spexmachina), so one pinned
+copy serves all three. It can be cross-checked against GitHub's own copy at
+`https://api.github.com/users/dmitriyb/ssh_signing_keys` once it is added
+under Settings → SSH and GPG keys → Signing keys — useful if this page itself
+is suspected of being tampered with in a fork or mirror.
 
 ## Upgrading
 
-An installed binary updates itself with `portitor upgrade`, which embeds the same signed `install.sh` above and runs it against the running binary's own path — same resolve → download → SSHSIG-verify, then a safe in-place swap (move-aside + `rename(2)`, never a write over the running file), keeping the previous binary as `<path>.bak`.
-Upgrade is **forward-only**: it resolves the latest release and moves toward it, and hard-refuses (non-overridable) a resolved latest that is *older* than the installed version — a signature proves authenticity, not freshness, so a latest that moved backward is treated as a compromised-origin rollback anomaly.
-`--check` reports the latest without changing anything (warning, not refusing, when latest is older than installed), `--version vX.Y.Z` installs an exact release in any direction (the deliberate path to an older release), and `--rollback` restores the backup.
-`upgrade` maintains the standalone binary only; the container image is rebuilt from the `Dockerfile`, as above.
-See [`commands.md`](commands.md) for the full flag reference.
+An installed binary updates itself with `portitor upgrade`, which embeds the
+same signed `install.sh` and runs it against the running binary's own path:
+the same resolve → download → SSHSIG-verify, then a safe in-place swap
+(move-aside plus `rename(2)`, never a write over the running file), keeping
+the previous binary as `<path>.bak`. `upgrade` maintains the standalone
+binary only; the container image is rebuilt from the `Dockerfile`, as above.
+
+Upgrade is **forward-only**: it hard-refuses, non-overridably, a resolved
+latest that is *older* than the installed version — a signature proves
+authenticity, not freshness, so a latest that moved backward is treated as a
+rollback anomaly. `--check` reports the comparison without changing anything
+(a warning, not a refusal, when latest is older than installed),
+`--version vX.Y.Z` installs an exact release in any direction (the deliberate
+path to an older release), and `--rollback` restores the backup. See
+[`commands.md`](commands.md) for the flag reference.
