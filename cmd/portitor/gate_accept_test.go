@@ -1,31 +1,23 @@
 //go:build acceptance
 
 // This file is the container-level gate acceptance suite (spec/proposals/
-// 2026-08-05-gate-acceptance-suite.md): it builds the gate image from THIS
-// working tree, stands up a real container on a throwaway docker network
-// with ephemeral role keys, and drives it through its actual front door —
-// git push over SSH (pre/post-receive) and `portitor pr` over SSH (the
-// forced-command action API) — against the disposable repo testdata/
-// realgh.local.json points at, asserting the gate's decisions AND the
-// resulting real GitHub state. It complements realgh_test.go (which drives
-// internal/action.GH directly, no gate/container in the loop) and the fast
-// unit suite (pure functions, a stubbed gh runner) — this tier is the only
-// one that exercises config validation at container BOOT, the SSH forced-
-// command dispatch, and push-time content-rule enforcement over
-// git-receive-pack together, through the real binary built from this tree.
+// 2026-08-05-gate-acceptance-suite.md, run in CI since
+// 2026-11-09-hostless-deploy.md): it deploys a gate from THIS working tree
+// through the real `portitor deploy` sequence, with ephemeral role keys, and
+// drives it through its actual front door — git push over SSH
+// (pre/post-receive) and `portitor pr` over SSH (the forced-command action
+// API) — against the disposable repo PORTITOR_ACCEPT_REPO names, asserting the
+// gate's decisions AND the resulting real GitHub state. It is the only tier
+// that exercises the gate against real GitHub.
 //
-// Run explicitly:
+// Run (CI's acceptance workflow does):
 //
-//	go test -tags acceptance -run GateAccept ./cmd/portitor/...
+//	PORTITOR_ACCEPT_PAT=… PORTITOR_ACCEPT_REPO=owner/name go test -tags acceptance -run GateAccept ./cmd/portitor/...
 //
-// It is gated behind the "acceptance" build tag (never compiled by a plain
-// `go test ./...`, so it can never run under CI or a casual local run) AND,
-// at every top-level test, by loadRealGHConfig + the keychain-held PAT
-// (realgh_test.go's setupRealGH, reused verbatim here) AND a docker
-// availability probe — any of the three missing SKIPs, never fails. Like
-// realgh_test.go, the PAT is read only from the keychain (never the process
-// environment); it reaches the gate as a file copied into the created container
-// (gateaccept_harness_test.go's standUpGate), never in a docker argv or a log.
+// It is gated behind the "acceptance" build tag AND, at every top-level test,
+// by those two variables (setupRealGH: missing ones skip, or fail under CI) AND
+// a docker availability probe. The PAT reaches the gate as the credential file
+// deploy copies into the created container, never in a docker argv or env.
 //
 // v1 implements the harness end-to-end plus scenario 3 (the headline single-
 // account merge model) in full. Scenarios 1, 2, 4, 5, 6 are stubbed
@@ -440,6 +432,11 @@ func waitRunsCompleted(t *testing.T, repo, headSHA string) {
 //  6. a second `pr rerun` -> refused at the checks.max_attempts cap (2), with
 //     the attributable message.
 func TestGateAccept_RerunPath(t *testing.T) {
+	// CI's acceptance PAT has no Workflows permission and the disposable repo
+	// runs no Actions, so a leaked PAT stays worthless; this scenario needs both.
+	if os.Getenv("PORTITOR_ACCEPT_ACTIONS") != "1" {
+		t.Skip("needs a PAT with the Workflows permission and Actions on the disposable repo; set PORTITOR_ACCEPT_ACTIONS=1 to run it")
+	}
 	env := setupGateAccept(t)
 	resetDisposableRepo(t, env)
 
@@ -626,7 +623,7 @@ func TestGateAccept_TransparentApprove(t *testing.T) {
 
 // TestGateAccept_ConfigBootRejection is scenario 2: a per-repo config
 // carrying the retired `reviews_log` key or `merge_gate.review: "internal"`
-// makes the gate refuse at boot (deploy/entrypoint.sh's validate-config loop
+// makes the gate refuse at boot (the entrypoint's validate-config loop
 // over every repos.d/*.json) — the container must exit non-zero and never
 // start sshd, rather than silently serving with a config it strict-decodes
 // as invalid.

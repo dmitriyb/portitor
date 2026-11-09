@@ -3,7 +3,7 @@
 package main
 
 // Seed/reset for the disposable GitHub repo the gate acceptance suite drives
-// (testdata/realgh.local.json), plus the scenario 3 per-repo config builder.
+// (PORTITOR_ACCEPT_REPO), plus the scenario 3 per-repo config builder.
 // The repo starts genuinely empty (spec/proposals/2026-08-05-
 // gate-acceptance-suite.md): ensureSeed creates its pristine state once (an
 // initial commit + the `gateaccept-seed` tag); resetDisposableRepo restores
@@ -47,11 +47,8 @@ const (
 // .beads/issues.jsonl: the file is one JSON object per line (beads' own
 // jsonl shape); this wraps stdin's lines into the {"issues":[...]} array
 // check.Records expects at records_path "issues" — a tiny stand-in for a
-// real record-extractor tool (like the `br` CLI DEPLOY.md's worked example
-// uses), written directly against alpine's busybox awk/sh so the suite needs
-// nothing beyond what the shipped Dockerfile already installs. Verified by
-// hand against both BSD awk (macOS) and busybox awk (the gate image) to
-// produce valid JSON, including on a single-line/no-trailing-comma input.
+// real record-extractor tool (like the `br` CLI), written against plain POSIX
+// awk/sh so the suite needs nothing beyond the gate image's fixed part (gawk).
 const jsonlWrapScript = `awk 'BEGIN{printf "{\"issues\":["} {if(NR>1)printf ","; printf "%s", $0} END{printf "]}"}'`
 
 // beadClosedScript is the merge_gate.checks "bead-closed" predicate: exit 0

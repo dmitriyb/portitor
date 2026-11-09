@@ -28,10 +28,15 @@ Both tiers deploy a real gate, so both jobs install Nix (`cachix/install-nix-act
 commit SHA, with a pinned Nix version) and cache the Nix store between runs, and both configure
 the runner's Docker daemon with `"userns-remap": "default"` and restart it before the tests.
 
-- **Docker tier** — a job in `ci.yml`: `PORTITOR_REQUIRE_USERNS=1 go test -tags docker ./...`.
-  No secrets. Its scenarios are in `test_deploy.md`.
-- **Acceptance tier** — `.github/workflows/acceptance.yml`: `go test -tags acceptance ./...`
-  against one disposable GitHub repo. The step gets `PORTITOR_ACCEPT_PAT` (a repository secret)
+The remap step is `scripts/ci-userns-remap.sh`, which merges the setting into the runner's
+`daemon.json` and fails unless the restarted daemon reports a user namespace.
+
+- **Docker tier** — a job in `ci.yml`: `PORTITOR_REQUIRE_USERNS=1 go test -tags docker -run
+  DockerTier -timeout 40m ./cmd/portitor/`. No secrets. Its scenarios are in `test_deploy.md`.
+- **Acceptance tier** — `.github/workflows/acceptance.yml`: `go test -tags acceptance -run
+  GateAccept -timeout 50m ./cmd/portitor/` against one disposable GitHub repo. It is skipped for
+  pull requests from forks and from Dependabot, which get no secrets. The Actions-proxy scenario
+  does not run here (see `test_deploy.md`). The step gets `PORTITOR_ACCEPT_PAT` (a repository secret)
   and `PORTITOR_ACCEPT_REPO` (a repository variable) in its env and nothing else does. The PAT is
   fine-grained, limited to Contents and Pull requests on that one private repo, with Actions
   disabled there, so a leak reaches only a repo every scenario resets anyway. The workflow's

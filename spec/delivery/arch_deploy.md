@@ -15,11 +15,11 @@ directory; `gate_bin` must be absolute; `token_command` is an argv run as is.
 
 | Field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Container name, also the image repository suffix; `^[a-z0-9][a-z0-9_.-]{0,62}$` |
+| `name` | yes | Container name, also the image repository suffix: at least 2 characters, `^[a-z0-9]+(?:(?:[._]\|__\|-+)[a-z0-9]+)*$` |
 | `volume` | yes | Named volume for the mirrors, mounted at `/srv/git` |
 | `host_key_volume` | yes | Named volume for the SSH host key, mounted at `/var/lib/portitor/hostkey` |
 | `networks` | no | `[{name, aliases}]`: existing Docker networks to attach, each with its aliases |
-| `ports` | no | `[{host_ip, host_port}]`: publishes container port 22; `host_port` `0` lets Docker pick |
+| `ports` | no | `[{host_ip, host_port}]`: publishes container port 22 (an IPv6 `host_ip` is bracketed); `host_port` `0` lets Docker pick |
 | `config_dir` | yes | The gate's config dir (`repos.d/`, `allowed_signers`, anything they reference) |
 | `authorized_keys` | yes | Paths of the role `.pub` files; their `<type> <key>` lines become `AGENT_AUTHORIZED_KEY` |
 | `token_command` | yes | Argv whose stdout is the GitHub PAT; `argv[0]` is a bare name looked up on `PATH` or absolute |
@@ -32,7 +32,7 @@ directory; `gate_bin` must be absolute; `token_command` is an argv run as is.
 `image.packages` are attribute paths in the pinned nixpkgs. `image.overlay` is one Nix file,
 staged alone beside the rendered expression and applied to nixpkgs; a relative import inside it
 fails the build. `image.pin` is `{rev, sha256}` and replaces the nixpkgs pin compiled into
-portitor. Volume and network names follow Docker's `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`.
+portitor. Volume and network names follow Docker's `^[a-zA-Z0-9][a-zA-Z0-9_.-]+$` (at least 2 characters).
 
 ## Image
 
@@ -45,9 +45,9 @@ are the bytes staged. The build is skipped when the tag already exists.
 
 The fixed part, which portitor owns:
 
-- **Runtime:** bash (also `/bin/sh`), coreutils, gawk, openssh, git, gh, tini, util-linux
-  (`setpriv`), cacert, with `/etc/ssl/certs/ca-certificates.crt` linking the bundle so TLS clients
-  need no env var.
+- **Runtime:** bash (also `/bin/sh`), `/usr/bin/env` (for `#!/usr/bin/env` scripts), coreutils,
+  gawk, openssh, git, gh, tini, util-linux (`setpriv`), cacert, with
+  `/etc/ssl/certs/ca-certificates.crt` linking the bundle so TLS clients need no env var.
 - **Identity:** `/etc/passwd`, `/etc/group`, `/etc/shadow` with `root`, `git` (uid and gid
   1000, home `/home/git`, shadow `*` so key login works) and the locked `sshd` privsep user.
 - **sshd:** `/etc/ssh/sshd_config` — public keys only, no root login, no PAM,
@@ -74,12 +74,14 @@ environment.
 1. **Lock.** An exclusive flock on `deploy-<name>.lock` under `$XDG_RUNTIME_DIR/portitor`
    (else the OS temp dir), held to the end, so two deploys of one gate never interleave.
 2. **Preflight.** Decode the config. Read `portitor-gate`'s ELF header (linux, the host's
-   arch) and its build info (`main.version`); a version other than the running binary's refuses.
+   arch) and its Go build info — module version and VCS revision, read from the file, since a
+   linux binary cannot run on a darwin host; a build other than the running binary's refuses.
    The daemon's architecture must equal the host's. Every listed network must exist. The
    container named `name`, when present, must carry the label `portitor.deploy=<name>`; a foreign
-   one refuses. Labelled leftovers of an interrupted deploy are resolved here: an unstarted
-   `<name>-next-*` is removed; a `<name>-prev-*` with no container named `name` is renamed back
-   and started.
+   one refuses. Labelled leftovers of an interrupted deploy are resolved here: a `<name>-next-*`
+   is removed; a lone `<name>-prev-*` with no container named `name` is renamed back and
+   started; a `<name>-prev-*` beside a container named `name` refuses, for the operator to
+   decide which one stays.
 3. **Build** the image (above).
 4. **Validate.** For every `repos.d/*.json`: `portitor validate-config` as `git` inside the
    built image, `--network none`.
@@ -111,7 +113,10 @@ environment.
 
 A failure in steps 1–8 leaves the previous gate untouched and removes the new container. A
 failure in steps 9–11 removes the new container, renames the previous gate back and starts it.
-Volumes are never removed. Every failure exits non-zero and names the step.
+An interrupt (SIGINT, SIGTERM) is such a failure: the cleanup runs under its own deadline
+(`stop_timeout` + `start_timeout`), not the interrupted one. The gate binary is checked again as
+the staged copy the image bakes. Volumes are never removed. Every failure exits non-zero and
+names the step.
 
 ## Migration
 

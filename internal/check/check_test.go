@@ -7,13 +7,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dmitriyb/portitor/internal/credential"
 	"github.com/dmitriyb/portitor/internal/rules"
 )
+
+// testCredentialEnv carries a test's credential path into the re-exec'd
+// trampoline, which is a fresh process of this test binary.
+const testCredentialEnv = "PORTITOR_TEST_CREDENTIAL_PATH"
 
 // TestMain intercepts the internal-check-exec re-exec: Records spawns
 // os.Executable() — in tests, this test binary.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "internal-check-exec" {
+		if p := os.Getenv(testCredentialEnv); p != "" {
+			credential.Path = p
+		}
 		os.Exit(TrampolineMain(os.Args[2:]))
 	}
 	os.Exit(m.Run())

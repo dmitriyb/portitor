@@ -5,12 +5,15 @@
 | `portitor pre-receive` / `post-receive` | the bare's git hooks | the gate / forward + auto-PR |
 | `portitor init-repo --bare … [--config …] [--upstream …]` | operator | create a gated bare repo (+ mirror) |
 | `portitor add-repo --repo <name> --upstream <url>` | operator | init-repo via the registry conventions |
+| `portitor add-repo --ensure --repo <name>` | the gate's boot | provision from the repo config unless already provisioned |
 | `portitor add-role --repo <name> --role <r> --fingerprint SHA256:… [--pub <file>]` | operator | bind a fingerprint→role (+ trust its key) |
 | `portitor upgrade-repo --repo <name>` | operator | re-bake hook shims to the current version |
 | `portitor reconcile --repo <name>` | operator | re-forward accepted branches after a forward failure |
-| `portitor upgrade [--check] [--version vX.Y.Z] [--rollback]` | operator | update the standalone binary forward to the latest signed release |
+| `portitor upgrade [--check] [--version vX.Y.Z] [--rollback]` | operator | update the `portitor`/`portitor-gate` pair forward to the latest signed release |
+| `portitor deploy --config <file>` | operator | build the gate image with Nix and replace the gate with a verified one |
 | `portitor validate-config [--config <path>]` | operator / boot | fail fast on a missing/invalid config |
-| `portitor shell <fingerprint>` | sshd forced command | dispatch to git-pack, the `pr` API, or the MCP splice |
+| `portitor shell <fingerprint>` | sshd forced command | dispatch to git-pack (provisioned repos only), the `pr` API, or the MCP splice |
+| `portitor git-credential <get\|store\|erase>` | git, inside the gate | answer github.com from the gate's credential file |
 | `portitor pr <action> --repo <name> --pr <n>` | the agent (via SSH) | one role-validated GitHub action |
 | `portitor mcp` | the agent (via SSH) | splice the connection to the MCP mediator |
 | `portitor version` / `--version` / `-v` | anyone | print version, commit, and build date |
@@ -18,7 +21,7 @@
 | `portitor-mcp validate-config [--config <path>]` | operator / boot | fail fast on a missing/invalid mediator config |
 | `portitor-mcp version` / `--version` / `-v` | anyone | print version, commit, and build date |
 
-Every `portitor` command above ships in the single released `portitor` binary (see [`install.md`](install.md)) — the same binary the container image runs. `portitor-mcp` is a second released binary from the same tag and version (one tag ships the tested pair); it runs in its own container/user with its own credentials — see `deploy.md`.
+Every `portitor` command above ships in the single released `portitor` binary (see [`install.md`](install.md)) — the same program the gate image runs as `portitor-gate`. `portitor-mcp` is a second released binary from the same tag and version (one tag ships the tested pair); it runs in its own container/user with its own credentials — see `deploy.md`.
 `add-role`, `validate-config`, and `reconcile` are also useful run standalone from an operator's own machine, outside the container, against a mounted or copied registry.
 
 Prefer `add-role` over hand-editing the `roles` map: it validates the fingerprint, upserts atomically under a lock, optionally trusts a signing key in `allowed_signers` (deduped), and re-validates — so a fat-fingered key or a half-written file can't quietly weaken the gate.
@@ -58,5 +61,5 @@ If the resolved latest is **older** than the installed version, `upgrade` hard-r
 
 If the target directory is not writable, `upgrade` prints a "re-run with elevated privileges" message and stops — it never silently re-invokes `sudo`.
 
-This command maintains the **standalone operator binary** only (the one also used for `add-role`, `validate-config`, and `reconcile`).
-The container image (gate + egress) is a separate artifact rebuilt from the `Dockerfile` — `upgrade` does not touch it; see `deploy.md` for the CLI-vs-image split.
+This command maintains the **`portitor`/`portitor-gate` pair** only: the operator binary (also used for `add-role`, `validate-config`, `reconcile` and `deploy`) and the linux `portitor-gate` beside it.
+A running gate keeps its image until the next `portitor deploy` bakes the new `portitor-gate`; see `deploy.md`.

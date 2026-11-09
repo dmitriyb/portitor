@@ -18,7 +18,10 @@ that `portitor deploy` bakes into the gate image. The script fetches the release
 archive, and installs its binary as `portitor-gate` beside the tool (on a Linux host the two
 archives are the same one, fetched once). Upgrade mode takes `--gate-target <path>` (default:
 `portitor-gate` beside `--target`) and `--gate-current <version>`, which `portitor upgrade` reads
-from the gate binary's build info, since a linux binary cannot be executed on a darwin host. The
+from the gate binary's Go build info (its module version, passed only when it is a release
+version), since a linux binary cannot be executed on a darwin host. Without `--gate-current` the
+script probes `<gate> version` on a linux host and, on any other, treats the gate as needing
+repair. The
 pair is up to date only when both are at the target version; otherwise both are replaced — a
 missing or mismatched `portitor-gate` is repaired even when `portitor` itself is current. Both
 files go through the same stage, move-aside and rename, `--rollback` restores both `.bak` files,

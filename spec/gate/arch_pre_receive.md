@@ -246,10 +246,10 @@ content at `/etc/portitor`. The embedded entrypoint, run as root under tini:
 4. installs `AGENT_AUTHORIZED_KEY` with the forced command, as before;
 5. validates every repo config, as `git`;
 6. as `git` (`setpriv --reuid --regid --init-groups`, with `HOME`, `USER`, `LOGNAME` set),
-   provisions every `repos.d/<repo>.json` whose repo is not provisioned: `add-repo` with the
-   config's default branch and, when `upstream_slug` is set, `https://github.com/<slug>.git`
-   (without it the repo is provisioned with no upstream, and boot logs that); a failure refuses
-   to boot;
+   provisions every `repos.d/<repo>.json` whose repo is not provisioned: `add-repo --ensure`,
+   which takes the config's default branch and, when `upstream_slug` is set,
+   `https://github.com/<slug>.git` (without it the repo is provisioned with no upstream, and it
+   logs that), and leaves a provisioned repo alone; a failure refuses to boot;
 7. execs sshd in the foreground.
 
 It never logs in to GitHub: portitor reads the token per call (see spec/action/arch_action.md), so

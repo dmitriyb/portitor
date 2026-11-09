@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dmitriyb/portitor/internal/credential"
 )
 
 // ghTimeout bounds every gh subprocess (network calls to GitHub). A hung gh
@@ -27,11 +29,18 @@ const ghTimeout = 2 * time.Minute
 // Runner executes gh with the given args and returns stdout. Swapped in tests.
 type Runner func(args ...string) (string, error)
 
-// defaultRunner runs the real gh binary.
+// defaultRunner runs the real gh binary, handing it the gate's credential on
+// the child's environment only (never a stored login), or leaving gh's ambient
+// authentication alone where no credential file exists.
 func defaultRunner(args ...string) (string, error) {
+	env, err := ghEnv(os.Environ())
+	if err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Env = env
 	cmd.WaitDelay = 5 * time.Second
 	var out, errb strings.Builder
 	cmd.Stdout = &out
@@ -43,6 +52,20 @@ func defaultRunner(args ...string) (string, error) {
 		return out.String(), fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
+}
+
+// ghEnv is base with GH_TOKEN set from the gate's credential file when that
+// file exists; os/exec keeps the last value of a duplicated key, so it wins over
+// any inherited GH_TOKEN.
+func ghEnv(base []string) ([]string, error) {
+	tok, present, err := credential.Read()
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return base, nil
+	}
+	return append(base, "GH_TOKEN="+tok), nil
 }
 
 // GH performs actions against a single repository (owner/name slug).

@@ -1,0 +1,57 @@
+name: Acceptance
+
+# The real-GitHub suite against one disposable repo. Its PAT is limited to
+# Contents and Pull requests on that one private repo (Actions disabled there)
+# and reaches only the test step's env. This assumes people push portitor's
+# branches; once agents do, freeze .github/** for them in the gate policy first.
+on:
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "spec/**"
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "spec/**"
+
+# Every run resets the same disposable repo: runs must never overlap, and a
+# cancelled one would leave its PRs and branches behind.
+concurrency:
+  group: acceptance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: real-GitHub acceptance
+    # Fork and Dependabot pull requests get no secrets, so the suite could only
+    # fail there.
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.4/install
+
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('internal/deploy/image.go', 'internal/deploy/image.nix.tmpl') }}
+
+      - name: Enable userns-remap
+        run: scripts/ci-userns-remap.sh
+
+      - name: Acceptance
+        env:
+          PORTITOR_ACCEPT_PAT: ${{ secrets.PORTITOR_ACCEPT_PAT }}
+          PORTITOR_ACCEPT_REPO: ${{ vars.PORTITOR_ACCEPT_REPO }}
+        run: go test -tags acceptance -run GateAccept -v -timeout 50m ./cmd/portitor/

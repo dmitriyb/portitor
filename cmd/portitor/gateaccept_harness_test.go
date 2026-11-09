@@ -1,30 +1,37 @@
-//go:build acceptance
+//go:build acceptance || docker
 
 package main
 
-// This file is the docker/ssh harness backing the container-level gate
-// acceptance suite (gate_accept_test.go): building the gate image from THIS
-// tree, standing a container up on a throwaway network with ephemeral role
-// keys, and driving it over its real SSH front door (git push + `portitor
-// pr`). See spec/proposals/2026-08-05-gate-acceptance-suite.md.
+// This file is the docker/ssh harness shared by the container-level suites —
+// the docker tier (deploy_docker_test.go) and the real-GitHub acceptance suite
+// (gate_accept_test.go): deploying a gate from THIS tree through the real
+// `portitor deploy` sequence, with ephemeral role keys, and driving it over its
+// real SSH front door (git push + `portitor pr`). See
+// spec/delivery/test_deploy.md.
 //
-// Nothing here runs unless a top-level acceptance test's body executes —
-// every function is a helper called FROM a test, never from an init/TestMain,
-// so `go test -tags acceptance -run <a non-matching pattern>` never invokes
-// docker at all (see gate_accept_test.go's header for the exact command).
+// Nothing here runs unless a top-level test's body executes — every function
+// is a helper called FROM a test, never from an init/TestMain, so `go test
+// -tags acceptance -run <a non-matching pattern>` never invokes docker at all.
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/dmitriyb/portitor/internal/deploy"
 )
 
 // ---- docker plumbing ----
@@ -38,7 +45,9 @@ func dockerAvailable() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "docker", "info").Run() == nil
+	cmd := exec.CommandContext(ctx, "docker", "info")
+	cmd.Env = withoutTokens(os.Environ())
+	return cmd.Run() == nil
 }
 
 // runDocker runs a docker subcommand, failing the test loudly on error. The PAT
@@ -54,7 +63,9 @@ func runDocker(t *testing.T, args ...string) string {
 // message — kept for any future docker call that would have to embed the PAT.
 func runDockerSafe(t *testing.T, secret string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	cmd := exec.Command("docker", args...)
+	cmd.Env = withoutTokens(os.Environ())
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker %s: %v\n%s", redactSecret(strings.Join(args, " "), secret), err, redactSecret(string(out), secret))
 	}
@@ -66,7 +77,9 @@ func runDockerSafe(t *testing.T, secret string, args ...string) string {
 // the rest of t.Cleanup.
 func tryDocker(t *testing.T, args ...string) {
 	t.Helper()
-	if out, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+	cmd := exec.Command("docker", args...)
+	cmd.Env = withoutTokens(os.Environ())
+	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Logf("docker %s (cleanup, best-effort): %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
@@ -93,9 +106,8 @@ func sanitizeTag(name string) string {
 	return b.String()
 }
 
-// repoRoot locates the portitor working tree root (holding the Dockerfile
-// this suite must build) from the test binary's working directory
-// (cmd/portitor).
+// repoRoot locates the portitor working tree root (go.mod) from the test
+// binary's working directory (cmd/portitor).
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
@@ -106,20 +118,40 @@ func repoRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "Dockerfile")); err != nil {
-		t.Fatalf("could not locate the repo root (Dockerfile) from %s: %v", wd, err)
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("could not locate the repo root (go.mod) from %s: %v", wd, err)
 	}
 	return root
 }
 
-// buildGateImage builds the gate image from the CURRENT working tree (never a
-// release) under a tag unique to this test run, and registers its removal.
-func buildGateImage(t *testing.T) string {
+var (
+	gateBinOnce sync.Once
+	gateBinPath string
+	gateBinErr  error
+)
+
+// gateBinary builds portitor-gate from the CURRENT working tree (never a
+// release) for the Docker daemon's architecture, once per test binary.
+func gateBinary(t *testing.T) string {
 	t.Helper()
-	tag := fmt.Sprintf("portitor-gateaccept:%s-%d", sanitizeTag(t.Name()), time.Now().UnixNano())
-	runDocker(t, "build", "-q", "-t", tag, repoRoot(t))
-	t.Cleanup(func() { tryDocker(t, "rmi", "-f", tag) })
-	return tag
+	gateBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "portitor-gate-bin-")
+		if err != nil {
+			gateBinErr = err
+			return
+		}
+		gateBinPath = filepath.Join(dir, "portitor-gate")
+		cmd := exec.Command("go", "build", "-trimpath", "-o", gateBinPath, "./cmd/portitor")
+		cmd.Dir = repoRoot(t)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			gateBinErr = fmt.Errorf("go build portitor-gate: %v\n%s", err, out)
+		}
+	})
+	if gateBinErr != nil {
+		t.Fatal(gateBinErr)
+	}
+	return gateBinPath
 }
 
 // ---- ephemeral role keys ----
@@ -198,175 +230,119 @@ func writeAllowedSigners(t *testing.T, path string, roles ...roleKey) {
 // roles installed on it.
 type gateInstance struct {
 	name       string
-	network    string
 	volume     string
 	image      string
 	port       int
 	knownHosts string
+	pinFile    string
 }
 
-// standUpGate builds the gate image from this tree and starts it the way
-// deploy/run.sh does (a Go mirror of it, not the script itself — the script's own
-// steps are covered by deploy_runsh_test.go): the given per-repo config directory baked into a
-// derived image at /etc/portitor, the container created on a throwaway network
-// with a throwaway repos volume and the roles' public keys in
-// AGENT_AUTHORIZED_KEY, the PAT copied to /run/secrets/gh_token inside it, then
-// started. No host path is mounted and the PAT is never an env var. Every
-// resource is torn down via t.Cleanup, in reverse creation order, even on failure.
+// standUpGate deploys a gate from this tree through the real `portitor deploy`
+// sequence (internal/deploy, with the real docker and nix): the given config
+// directory baked in, the roles' public keys installed, the PAT delivered as the
+// copied-in credential file, the SSH port published on 127.0.0.1. The PAT goes
+// straight to the deployer, never through an env var a docker child could
+// inherit. Every resource is torn down via t.Cleanup, even on failure.
 func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string) *gateInstance {
 	t.Helper()
-	image := buildGateImage(t)
-	uniq := sanitizeTag(t.Name()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	network := "portitor-ga-net-" + uniq
-	volume := "portitor-ga-repos-" + uniq
-	name := "portitor-ga-" + uniq
-
-	runDocker(t, "network", "create", network)
-	t.Cleanup(func() { tryDocker(t, "network", "rm", network) })
-	runDocker(t, "volume", "create", volume)
-	t.Cleanup(func() { tryDocker(t, "volume", "rm", volume) })
-	cfgImage := bakeGateConfig(t, image, cfgDir, "portitor-ga-cfg-"+uniq)
-
-	var authKeys strings.Builder
-	for _, rk := range roles {
-		authKeys.WriteString(rk.pubLine)
-		authKeys.WriteString("\n")
-	}
-
-	// Cleanup registered BEFORE the create call returns, via defer-free
-	// t.Cleanup ordering: even if `docker create` itself fails partway (daemon
-	// created the container object before erroring), rm -f is safe/no-op on
-	// an absent container.
-	t.Cleanup(func() { tryDocker(t, "rm", "-f", name) })
-	runDocker(t, "create", "--name", name, "--network", network,
-		"-p", "127.0.0.1::22",
-		"-v", volume+":/srv/git",
-		"-e", "AGENT_AUTHORIZED_KEY="+authKeys.String(),
-		cfgImage,
-	)
-	tokenFile := filepath.Join(t.TempDir(), "gh_token")
-	if err := os.WriteFile(tokenFile, []byte(pat), 0o600); err != nil {
-		t.Fatalf("write PAT file: %v", err)
-	}
-	runDocker(t, "cp", tokenFile, name+":/run/secrets/gh_token")
-	if err := os.Remove(tokenFile); err != nil {
-		t.Fatalf("remove PAT file: %v", err)
-	}
-	runDocker(t, "start", name)
-
-	gi := &gateInstance{name: name, network: network, volume: volume, image: cfgImage}
-	gi.waitReady(t)
-	gi.pinHostKey(t)
+	gi, _ := deployGate(t, cfgDir, roles, pat, nil)
 	return gi
 }
 
-// bakeGateConfig builds tag = base plus cfgDir at /etc/portitor the way
-// deploy/run.sh does: the whole tree minus .lock and dot-prefixed entries,
-// root-owned, files 0644 (0755 if any exec bit is set), directories 0755. Like
-// run.sh it then runs `portitor validate-config` for every repo config as user git
-// inside the image, so an unreadable or invalid baked config fails here, by exit
-// status, before the gate starts.
-func bakeGateConfig(t *testing.T, base, cfgDir, tag string) string {
+// deployGate is standUpGate returning the deploy config path as well; given
+// prev, it re-deploys that gate (same name, volumes and pin).
+func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string, prev *gateInstance) (*gateInstance, string) {
 	t.Helper()
-	ctx := t.TempDir()
-	dst := filepath.Join(ctx, "etc", "portitor")
-	var cfgs []string // container paths of the repo configs
-	err := filepath.WalkDir(cfgDir, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	name, pinFile := "", ""
+	if prev != nil {
+		name, pinFile = prev.name, prev.pinFile
+	}
+	gate := gateBinary(t)
+	work := filepath.Join(t.TempDir(), "deploy")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fresh := name == ""
+	if fresh {
+		sum := sha256.Sum256([]byte(t.Name() + strconv.FormatInt(time.Now().UnixNano(), 10)))
+		name = "pga-" + hex.EncodeToString(sum[:6])
+	}
+	var keys []string
+	for role, rk := range roles {
+		p := filepath.Join(work, role+".pub")
+		if err := os.WriteFile(p, []byte(rk.pubLine+"\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
-		rel, err := filepath.Rel(cfgDir, p)
-		if err != nil || rel == "." {
-			return err
-		}
-		if name := d.Name(); strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".lock") {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
-		}
-		copyReadable(t, p, filepath.Join(dst, rel))
-		if filepath.Dir(rel) == "repos.d" && strings.HasSuffix(rel, ".json") {
-			cfgs = append(cfgs, "/etc/portitor/"+filepath.ToSlash(rel))
-		}
-		return nil
-	})
+		keys = append(keys, p)
+	}
+	if pinFile == "" {
+		pinFile = filepath.Join(t.TempDir(), name+".hostkey")
+	}
+	cfg := map[string]any{
+		"name":            name,
+		"volume":          name + "-repos",
+		"host_key_volume": name + "-hostkey",
+		"ports":           []map[string]any{{"host_ip": "127.0.0.1", "host_port": 0}},
+		"config_dir":      cfgDir,
+		"authorized_keys": keys,
+		"token_command":   []string{"unused-the-test-hands-the-token-over"},
+		"host_key_file":   pinFile,
+		"gate_bin":        gate,
+	}
+	b, err := json.Marshal(cfg)
 	if err != nil {
-		t.Fatalf("bakeGateConfig: copy %s: %v", cfgDir, err)
+		t.Fatal(err)
 	}
-	if len(cfgs) == 0 {
-		t.Fatalf("bakeGateConfig: no repos.d/*.json under %s", cfgDir)
+	cfgPath := filepath.Join(work, "deploy.json")
+	if err := os.WriteFile(cfgPath, b, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chown=0:0 etc/portitor/ /etc/portitor/\n", base)
-	if err := os.WriteFile(filepath.Join(ctx, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
-		t.Fatalf("bakeGateConfig: write Dockerfile: %v", err)
+	if fresh {
+		t.Cleanup(func() {
+			tryDocker(t, "rm", "-f", name)
+			tryDocker(t, "volume", "rm", name+"-repos", name+"-hostkey")
+		})
 	}
-	runDocker(t, "build", "-q", "-t", tag, ctx)
-	t.Cleanup(func() { tryDocker(t, "rmi", tag) })
-	for _, cfg := range cfgs {
-		runDocker(t, "run", "--rm", "--network", "none", "--user", "git",
-			"--entrypoint", "/usr/local/bin/portitor", tag, "validate-config", "--config", cfg)
+	c, err := deploy.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return tag
+	own, err := deploy.FileBuildID(gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &deploy.Deployer{
+		Run:     deploy.ExecRunner{},
+		Token:   func(context.Context, []string) ([]byte, error) { return []byte(pat), nil },
+		Log:     testWriter{t},
+		Arch:    runtime.GOARCH,
+		Own:     own,
+		GateBin: gate,
+		LockDir: t.TempDir(),
+	}
+	res, err := d.Deploy(context.Background(), c)
+	if err != nil {
+		logs, _ := dockerOut("logs", name)
+		t.Fatalf("portitor deploy: %v\ngate logs:\n%s", err, logs)
+	}
+	t.Cleanup(func() { tryDocker(t, "rmi", res.Image) })
+	gi := &gateInstance{name: name, volume: name + "-repos", image: res.Image, pinFile: pinFile}
+	p, ok := gi.tryResolvePort()
+	if !ok || !sshBannerReady(p) {
+		t.Fatalf("deployed gate %s serves no SSH banner on its published port", name)
+	}
+	gi.port = p
+	gi.pinHostKey(t, c.HostKeyFile)
+	return gi, cfgPath
 }
 
-// copyReadable copies src to dst (creating parents 0755) with mode 0644, or 0755
-// when src has any exec bit — the modes deploy/run.sh's `chmod -R u=rwX,go=rX`
-// produces.
-func copyReadable(t *testing.T, src, dst string) {
-	t.Helper()
-	data, err := os.ReadFile(src)
-	if err != nil {
-		t.Fatalf("copyReadable: %v", err)
-	}
-	fi, err := os.Stat(src)
-	if err != nil {
-		t.Fatalf("copyReadable: %v", err)
-	}
-	mode := os.FileMode(0o644)
-	if fi.Mode()&0o111 != 0 {
-		mode = 0o755
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		t.Fatalf("copyReadable: %v", err)
-	}
-	if err := os.WriteFile(dst, data, mode); err != nil {
-		t.Fatalf("copyReadable: %v", err)
-	}
-	if err := os.Chmod(dst, mode); err != nil { // WriteFile's mode is filtered by the umask
-		t.Fatalf("copyReadable: %v", err)
-	}
-}
+// testWriter sends deploy's progress lines to the test log.
+type testWriter struct{ t *testing.T }
 
-// waitReady polls until the container is running AND its sshd is actually
-// serving — verified by reading the "SSH-" identification banner, NOT a bare
-// TCP accept. On macOS Docker Desktop the port-forward proxy accepts the TCP
-// connection before anything in the container listens on 22, so a bare
-// DialTimeout is a false positive that races ahead of the entrypoint (before
-// even `ssh-keygen -A`, so the host key pinHostKey needs does not yet exist).
-// A real banner arrives only once sshd is up, which is after the host keys are
-// generated and the config-validate boot loop passed — exactly the state the
-// pin and every driving connection require. On timeout, fail with the
-// container's logs (the diagnostic that matters when the boot-time
-// validate-config loop refused to start it).
-func (gi *gateInstance) waitReady(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		state, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", gi.name).Output()
-		if err == nil && strings.TrimSpace(string(state)) == "true" {
-			if p, ok := gi.tryResolvePort(); ok && sshBannerReady(p) {
-				gi.port = p
-				return
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	logs, _ := exec.Command("docker", "logs", gi.name).CombinedOutput()
-	t.Fatalf("gate container %s did not become ready (no SSH banner) within 30s; logs:\n%s", gi.name, logs)
+func (w testWriter) Write(b []byte) (int, error) {
+	w.t.Helper()
+	w.t.Log(strings.TrimRight(string(b), "\n"))
+	return len(b), nil
 }
 
 // sshBannerReady dials the mapped port and reads the SSH identification banner
@@ -386,7 +362,7 @@ func sshBannerReady(port int) bool {
 }
 
 func (gi *gateInstance) tryResolvePort() (int, bool) {
-	out, err := exec.Command("docker", "port", gi.name, "22/tcp").Output()
+	out, err := dockerOut("port", gi.name, "22/tcp")
 	if err != nil {
 		return 0, false
 	}
@@ -402,25 +378,19 @@ func (gi *gateInstance) tryResolvePort() (int, bool) {
 	return p, true
 }
 
-// pinHostKey reads the gate's own ed25519 host key (generated by entrypoint's
-// `ssh-keygen -A` at boot) and pins it into a throwaway known_hosts file, so
-// the client connections below authenticate the SERVER too, not just the
-// other way around.
-func (gi *gateInstance) pinHostKey(t *testing.T) {
+// pinHostKey turns the pin deploy wrote into a throwaway known_hosts file, so
+// the client connections below authenticate the SERVER too.
+func (gi *gateInstance) pinHostKey(t *testing.T, pinFile string) {
 	t.Helper()
-	raw, cerr := exec.Command("docker", "exec", gi.name, "cat", "/etc/ssh/ssh_host_ed25519_key.pub").CombinedOutput()
-	if cerr != nil {
-		status, _ := exec.Command("docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}", gi.name).Output()
-		logs, _ := exec.Command("docker", "logs", gi.name).CombinedOutput()
-		t.Fatalf("cat host key failed: %v\noutput: %s\ncontainer state: %s\ncontainer logs:\n%s", cerr, raw, strings.TrimSpace(string(status)), logs)
+	b, err := os.ReadFile(pinFile)
+	if err != nil {
+		t.Fatalf("read the host-key pin: %v", err)
 	}
-	out := string(raw)
-	f := strings.Fields(out)
+	f := strings.Fields(string(b))
 	if len(f) < 2 {
-		t.Fatalf("unexpected host key output: %q", out)
+		t.Fatalf("unexpected pin content: %q", b)
 	}
-	dir := t.TempDir()
-	kh := filepath.Join(dir, "known_hosts")
+	kh := filepath.Join(t.TempDir(), "known_hosts")
 	line := fmt.Sprintf("[127.0.0.1]:%d %s %s\n", gi.port, f[0], f[1])
 	if err := os.WriteFile(kh, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
@@ -428,13 +398,11 @@ func (gi *gateInstance) pinHostKey(t *testing.T) {
 	gi.knownHosts = kh
 }
 
-// addRepo provisions the disposable repo on the gate via the REAL `portitor
-// add-repo` (run inside the container as the git user, exactly as an
-// operator would) — creates the bare repo, bakes the hook shims, and seeds
-// the default branch from upstream.
-func (gi *gateInstance) addRepo(t *testing.T, repo, upstreamURL string) {
+// addRepo asserts the gate provisioned repo at boot from its config (the
+// entrypoint's `add-repo --ensure`); running it again must be a no-op.
+func (gi *gateInstance) addRepo(t *testing.T, repo, _ string) {
 	t.Helper()
-	runDocker(t, "exec", "-u", "git", gi.name, "portitor", "add-repo", "--repo", repo, "--upstream", upstreamURL)
+	runDocker(t, "exec", "-u", "git", gi.name, "portitor", "add-repo", "--ensure", "--repo", repo)
 }
 
 // ---- driving the gate over SSH ----
@@ -558,4 +526,23 @@ func chmodTreePrivate(t *testing.T, root string) {
 	if err != nil {
 		t.Fatalf("chmodTreePrivate %s: %v", root, err)
 	}
+}
+
+// withoutTokens drops the PAT variables the acceptance suite sets for gh and
+// git, so no docker CLI the harness runs ever holds them.
+func withoutTokens(env []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GH_TOKEN=") && !strings.HasPrefix(kv, "GITHUB_TOKEN=") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// dockerOut runs a docker subcommand without the PAT variables in its env.
+func dockerOut(args ...string) ([]byte, error) {
+	cmd := exec.Command("docker", args...)
+	cmd.Env = withoutTokens(os.Environ())
+	return cmd.CombinedOutput()
 }

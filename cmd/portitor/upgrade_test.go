@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/dmitriyb/portitor/internal/deploy"
 )
 
 // TestUpgradeEmbeddedMatchesReleased is the security-critical identity
@@ -86,7 +90,7 @@ func TestUpgradeChildEnvStripsAmbientVERSION(t *testing.T) {
 
 // TestUpgradeHelpScopesToBinaryNotImage locks the documented scope into the
 // command's own help: upgrade replaces the standalone operator binary and
-// explicitly does NOT touch the container image (a separate Dockerfile artifact).
+// explicitly does NOT touch a running gate (the next portitor deploy bakes the new portitor-gate).
 func TestUpgradeHelpScopesToBinaryNotImage(t *testing.T) {
 	root := newRootCommand()
 	var out, errb strings.Builder
@@ -97,7 +101,7 @@ func TestUpgradeHelpScopesToBinaryNotImage(t *testing.T) {
 		t.Fatalf("upgrade --help: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"upgrade", "--check", "--version", "--rollback", "forward-only", "container image", "Dockerfile"} {
+	for _, want := range []string{"upgrade", "--check", "--version", "--rollback", "forward-only", "portitor-gate", "portitor deploy"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("upgrade help missing %q:\n%s", want, got)
 		}
@@ -123,5 +127,26 @@ func TestUpgradeFakeOriginHarness(t *testing.T) {
 	t.Logf("harness output:\n%s", out)
 	if err != nil {
 		t.Fatalf("fake-origin harness failed: %v", err)
+	}
+}
+
+func TestUpgradeGateArgs(t *testing.T) {
+	read := func(v string, err error) func(string) (deploy.BuildID, error) {
+		return func(string) (deploy.BuildID, error) { return deploy.BuildID{Version: v}, err }
+	}
+	cases := []struct {
+		name string
+		read func(string) (deploy.BuildID, error)
+		want []string
+	}{
+		{"release build", read("v0.4.1", nil), []string{"--gate-target", "/g", "--gate-current", "0.4.1"}},
+		{"no gate binary", read("", errors.New("no such file")), []string{"--gate-target", "/g"}},
+		{"pseudo-version", read("v0.4.1-0.20261109161914-de31f5968f6e+dirty", nil), []string{"--gate-target", "/g"}},
+		{"devel", read("(devel)", nil), []string{"--gate-target", "/g"}},
+	}
+	for _, c := range cases {
+		if got := gateArgsFrom("/g", c.read); !slices.Equal(got, c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
