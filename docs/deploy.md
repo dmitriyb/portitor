@@ -10,6 +10,27 @@ Two different things get built or installed differently — keep them separate:
 Write the per-repo config into the registry before bringing up the container — one file per repo at `<config-dir>/repos.d/<name>.json`, plus an `allowed_signers` file at `<config-dir>/allowed_signers`.
 See `configuration.md` for the full schema and an example.
 
+Bind the roles here too, on the host, with the standalone CLI — the container reads its config from its image, so roles bound inside a running container would vanish at the next `deploy/run.sh`.
+`add-role` writes `allowed_signers` at the path the config names, and at rest that is the in-container `/etc/portitor/allowed_signers`; point it at the host file for the calls and back afterwards (needs `jq` and the standalone CLI; the `trap` restores the path even when a call fails):
+
+```bash
+(
+  set -euo pipefail
+  dir=$PWD/portitor-config cfg=$PWD/portitor-config/repos.d/myrepo.json
+  orig=$(jq -r .allowed_signers "$cfg")   # the in-container path, restored as is
+  case "$orig" in /etc/portitor/*) ;; *) echo "allowed_signers is not under /etc/portitor: $orig" >&2; exit 1 ;; esac
+  signers() { jq --arg p "$1" '.allowed_signers=$p' "$cfg" >"$cfg.new" && mv "$cfg.new" "$cfg"; }
+  trap 'signers "$orig"' EXIT
+  signers "$dir/${orig#/etc/portitor/}"
+  PORTITOR_REPOS_DIR=$dir/repos.d portitor add-role \
+    --repo myrepo --role implementer --fingerprint SHA256:… --pub ./implementer.pub
+)
+```
+
+A config left pointing at a host path fails `deploy/run.sh`'s validation before any container exists.
+
+`add-role` is safer than hand-editing the `roles` map — see `configuration.md`.
+
 ## 2. Build and run the container
 
 ```bash
@@ -19,22 +40,23 @@ deploy/run.sh --config-dir ./portitor-config \
   --keys ./implementer.pub,./reviewer.pub,./merger.pub
 ```
 
-`deploy/run.sh` reads the GitHub PAT from your keychain and mounts the config dir read-only at `/etc/portitor` plus a persistent `/srv/git`.
+`deploy/run.sh` reads the GitHub PAT from your keychain, bakes the whole config dir (minus `.lock` and dot-prefixed entries) into a derived image at `/etc/portitor`, root-owned and world-readable, and runs `portitor validate-config` for every repo config as user `git` inside that image. Only then does it create the container from the image (by ID), copy the PAT to `/run/secrets/gh_token` inside, and start it with a persistent `/srv/git` volume.
+No host path is mounted and the PAT is never an env var or an image layer, so nothing the gate reads depends on host file ownership — the property a Docker daemon with userns-remap needs.
+The validation proves that `git` can read every repo config and that its `allowed_signers` path exists; it does not open the other paths a config names (rule and check commands).
+The whole config dir becomes world-readable inside the image and stays in docker's build cache, so keep secrets out of it.
+The PAT lives in the container's writable layer (`/run/secrets/gh_token`, and `git`'s gh login), as it always did; `docker commit`/`export` of the container would capture it.
+A config change no longer reaches a running gate by itself: re-run `deploy/run.sh`, which bakes a new image and recreates the container — open SSH sessions drop, the gate's SSH host key is regenerated (re-pin it wherever agents keep `known_hosts`), and a container attached to extra networks must be reattached. Superseded config images are left untagged; `docker image prune` removes them.
 The entrypoint runs `validate-config` over every registry config at boot and refuses to start if any is invalid.
-Upgrade ordering follows from that: when a new release adds a config field (e.g. `allowed_committer_emails`), upgrade the binary/image **before** seeding the field — an older binary's strict decode refuses the whole config, taking the gate down at boot.
+Upgrade ordering follows from that: when a new release adds a config field (e.g. `allowed_committer_emails`), upgrade the binary/image **before** seeding the field — an older binary's strict decode refuses the whole config. Through `deploy/run.sh` that refusal comes at validation, before the running container is replaced; a container started any other way fails at boot.
 
-## 3. Provision a repo and bind roles
+## 3. Provision a repo
 
 ```bash
 docker exec -u git portitor portitor add-repo \
   --repo myrepo --upstream https://github.com/you/myrepo.git
-
-docker exec -u git portitor portitor add-role \
-  --repo myrepo --role implementer --fingerprint SHA256:… --pub ./implementer.pub
 ```
 
-`add-repo` expects the repo's config to already exist at `repos.d/<name>.json` (step 1).
-`add-role` is safer than hand-editing the `roles` map — see `configuration.md`.
+`add-repo` expects the repo's config to already exist at `repos.d/<name>.json` (step 1, baked by `deploy/run.sh`).
 
 ## 4. Point the agent at portitor
 

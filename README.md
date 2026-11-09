@@ -87,7 +87,7 @@ git push ../demo.git HEAD:refs/heads/feature-unsigned             # rejected: un
 git push ../demo.git HEAD~1:refs/heads/main                       # rejected: no-push-to-default
 ```
 
-That is the gate in one sitting: a signed commit on a feature branch lands, an unsigned one is refused by name, and a push to the default branch is refused whatever it carries. With `--upstream` set on `init-repo`, an accepted branch is forwarded and its PR number is printed back over the push. The deployed shape, the gate in a container reached over SSH with an upstream on GitHub, is four commands in [`docs/deploy.md`](docs/deploy.md): `docker build`, `deploy/run.sh`, `add-repo`, `add-role`.
+That is the gate in one sitting: a signed commit on a feature branch lands, an unsigned one is refused by name, and a push to the default branch is refused whatever it carries. With `--upstream` set on `init-repo`, an accepted branch is forwarded and its PR number is printed back over the push. The deployed shape, the gate in a container reached over SSH with an upstream on GitHub, is four steps in [`docs/deploy.md`](docs/deploy.md): bind roles with `add-role` in the host's config dir, `docker build`, `deploy/run.sh`, `add-repo`.
 
 ## How it compares
 

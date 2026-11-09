@@ -24,9 +24,8 @@
 // (realgh_test.go's setupRealGH, reused verbatim here) AND a docker
 // availability probe — any of the three missing SKIPs, never fails. Like
 // realgh_test.go, the PAT is read only from the keychain (never the process
-// environment) and every docker/git invocation that could embed it redacts
-// it before it ever reaches a log or a failure message (see
-// gateaccept_harness_test.go's runDockerSafe).
+// environment); it reaches the gate as a file copied into the created container
+// (gateaccept_harness_test.go's standUpGate), never in a docker argv or a log.
 //
 // v1 implements the harness end-to-end plus scenario 3 (the headline single-
 // account merge model) in full. Scenarios 1, 2, 4, 5, 6 are stubbed
@@ -122,7 +121,7 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 	const repoName = "gateaccept"
 	settings := scenario3Settings(roles, env.GH.Repo, "/etc/portitor/allowed_signers")
 	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
-	chmodTreeReadable(t, cfgDir) // readable by the container's "git" user regardless of host/container uid mapping
+	chmodTreePrivate(t, cfgDir) // owner-only, like operator tooling leaves it: only the bake's mode normalization lets git read it
 
 	gi := standUpGate(t, cfgDir, roles, env.PAT)
 	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
@@ -279,7 +278,7 @@ func TestGateAccept_MirrorRefreshOnServe(t *testing.T) {
 	const repoName = "gateaccept-mirror-refresh"
 	settings := mirrorRefreshSettings(roles, "/etc/portitor/allowed_signers")
 	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
-	chmodTreeReadable(t, cfgDir)
+	chmodTreePrivate(t, cfgDir)
 
 	gi := standUpGate(t, cfgDir, roles, env.PAT)
 	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
@@ -458,7 +457,7 @@ func TestGateAccept_RerunPath(t *testing.T) {
 	const repoName = "gateaccept-rerun"
 	settings := rerunSettings(roles, env.GH.Repo, "/etc/portitor/allowed_signers")
 	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
-	chmodTreeReadable(t, cfgDir)
+	chmodTreePrivate(t, cfgDir)
 
 	gi := standUpGate(t, cfgDir, roles, env.PAT)
 	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")

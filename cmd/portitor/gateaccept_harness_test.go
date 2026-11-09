@@ -41,9 +41,9 @@ func dockerAvailable() bool {
 	return exec.CommandContext(ctx, "docker", "info").Run() == nil
 }
 
-// runDocker runs a docker subcommand, failing the test loudly on error. Not
-// for calls whose args may embed a secret (e.g. `run -e GH_TOKEN=...`) — use
-// runDockerSafe for those.
+// runDocker runs a docker subcommand, failing the test loudly on error. The PAT
+// never travels in a docker argv any more (standUpGate copies it in as a file),
+// so no caller needs runDockerSafe's redaction today.
 func runDocker(t *testing.T, args ...string) string {
 	t.Helper()
 	return runDockerSafe(t, "", args...)
@@ -51,8 +51,7 @@ func runDocker(t *testing.T, args ...string) string {
 
 // runDockerSafe is runDocker with secret redacted from both the logged
 // command and its captured output before either ever reaches a test failure
-// message — the one docker invocation that embeds the live PAT (`docker run
-// -e GH_TOKEN=...`) must never leak it into a log.
+// message — kept for any future docker call that would have to embed the PAT.
 func runDockerSafe(t *testing.T, secret string, args ...string) string {
 	t.Helper()
 	out, err := exec.Command("docker", args...).CombinedOutput()
@@ -206,13 +205,14 @@ type gateInstance struct {
 	knownHosts string
 }
 
-// standUpGate builds the gate image from this tree, runs it on a throwaway
-// network with a throwaway repos volume, the given per-repo config directory
-// mounted read-only at /etc/portitor, and the given roles' public keys
-// installed via AGENT_AUTHORIZED_KEY (the same mechanism deploy/run.sh uses).
-// pat is delivered exactly as the deploy path delivers it: GH_TOKEN in the
-// container's env (see deploy/entrypoint.sh). Every resource is torn down via
-// t.Cleanup, in reverse creation order, even on failure.
+// standUpGate builds the gate image from this tree and starts it the way
+// deploy/run.sh does (a Go mirror of it, not the script itself — the script's own
+// steps are covered by deploy_runsh_test.go): the given per-repo config directory baked into a
+// derived image at /etc/portitor, the container created on a throwaway network
+// with a throwaway repos volume and the roles' public keys in
+// AGENT_AUTHORIZED_KEY, the PAT copied to /run/secrets/gh_token inside it, then
+// started. No host path is mounted and the PAT is never an env var. Every
+// resource is torn down via t.Cleanup, in reverse creation order, even on failure.
 func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string) *gateInstance {
 	t.Helper()
 	image := buildGateImage(t)
@@ -225,6 +225,7 @@ func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat stri
 	t.Cleanup(func() { tryDocker(t, "network", "rm", network) })
 	runDocker(t, "volume", "create", volume)
 	t.Cleanup(func() { tryDocker(t, "volume", "rm", volume) })
+	cfgImage := bakeGateConfig(t, image, cfgDir, "portitor-ga-cfg-"+uniq)
 
 	var authKeys strings.Builder
 	for _, rk := range roles {
@@ -232,24 +233,112 @@ func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat stri
 		authKeys.WriteString("\n")
 	}
 
-	// Cleanup registered BEFORE the run call returns, via defer-free
-	// t.Cleanup ordering: even if `docker run` itself fails partway (daemon
+	// Cleanup registered BEFORE the create call returns, via defer-free
+	// t.Cleanup ordering: even if `docker create` itself fails partway (daemon
 	// created the container object before erroring), rm -f is safe/no-op on
 	// an absent container.
 	t.Cleanup(func() { tryDocker(t, "rm", "-f", name) })
-	runDockerSafe(t, pat, "run", "-d", "--name", name, "--network", network,
+	runDocker(t, "create", "--name", name, "--network", network,
 		"-p", "127.0.0.1::22",
-		"-v", cfgDir+":/etc/portitor:ro",
 		"-v", volume+":/srv/git",
-		"-e", "GH_TOKEN="+pat,
 		"-e", "AGENT_AUTHORIZED_KEY="+authKeys.String(),
-		image,
+		cfgImage,
 	)
+	tokenFile := filepath.Join(t.TempDir(), "gh_token")
+	if err := os.WriteFile(tokenFile, []byte(pat), 0o600); err != nil {
+		t.Fatalf("write PAT file: %v", err)
+	}
+	runDocker(t, "cp", tokenFile, name+":/run/secrets/gh_token")
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatalf("remove PAT file: %v", err)
+	}
+	runDocker(t, "start", name)
 
-	gi := &gateInstance{name: name, network: network, volume: volume, image: image}
+	gi := &gateInstance{name: name, network: network, volume: volume, image: cfgImage}
 	gi.waitReady(t)
 	gi.pinHostKey(t)
 	return gi
+}
+
+// bakeGateConfig builds tag = base plus cfgDir at /etc/portitor the way
+// deploy/run.sh does: the whole tree minus .lock and dot-prefixed entries,
+// root-owned, files 0644 (0755 if any exec bit is set), directories 0755. Like
+// run.sh it then runs `portitor validate-config` for every repo config as user git
+// inside the image, so an unreadable or invalid baked config fails here, by exit
+// status, before the gate starts.
+func bakeGateConfig(t *testing.T, base, cfgDir, tag string) string {
+	t.Helper()
+	ctx := t.TempDir()
+	dst := filepath.Join(ctx, "etc", "portitor")
+	var cfgs []string // container paths of the repo configs
+	err := filepath.WalkDir(cfgDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(cfgDir, p)
+		if err != nil || rel == "." {
+			return err
+		}
+		if name := d.Name(); strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".lock") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+		}
+		copyReadable(t, p, filepath.Join(dst, rel))
+		if filepath.Dir(rel) == "repos.d" && strings.HasSuffix(rel, ".json") {
+			cfgs = append(cfgs, "/etc/portitor/"+filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bakeGateConfig: copy %s: %v", cfgDir, err)
+	}
+	if len(cfgs) == 0 {
+		t.Fatalf("bakeGateConfig: no repos.d/*.json under %s", cfgDir)
+	}
+	dockerfile := fmt.Sprintf("FROM %s\nCOPY --chown=0:0 etc/portitor/ /etc/portitor/\n", base)
+	if err := os.WriteFile(filepath.Join(ctx, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("bakeGateConfig: write Dockerfile: %v", err)
+	}
+	runDocker(t, "build", "-q", "-t", tag, ctx)
+	t.Cleanup(func() { tryDocker(t, "rmi", tag) })
+	for _, cfg := range cfgs {
+		runDocker(t, "run", "--rm", "--network", "none", "--user", "git",
+			"--entrypoint", "/usr/local/bin/portitor", tag, "validate-config", "--config", cfg)
+	}
+	return tag
+}
+
+// copyReadable copies src to dst (creating parents 0755) with mode 0644, or 0755
+// when src has any exec bit — the modes deploy/run.sh's `chmod -R u=rwX,go=rX`
+// produces.
+func copyReadable(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("copyReadable: %v", err)
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		t.Fatalf("copyReadable: %v", err)
+	}
+	mode := os.FileMode(0o644)
+	if fi.Mode()&0o111 != 0 {
+		mode = 0o755
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatalf("copyReadable: %v", err)
+	}
+	if err := os.WriteFile(dst, data, mode); err != nil {
+		t.Fatalf("copyReadable: %v", err)
+	}
+	if err := os.Chmod(dst, mode); err != nil { // WriteFile's mode is filtered by the umask
+		t.Fatalf("copyReadable: %v", err)
+	}
 }
 
 // waitReady polls until the container is running AND its sshd is actually
@@ -451,22 +540,22 @@ func gitConfigSigning(t *testing.T, dir string, rk roleKey, email string) {
 	}
 }
 
-// chmodTreeReadable makes every file/dir under root world-readable (files
-// a+r, dirs a+rx) so the container's "git" user — a different uid than the
-// host user who wrote these files — can read the bind-mounted config
-// regardless of platform-specific bind-mount uid mapping.
-func chmodTreeReadable(t *testing.T, root string) {
+// chmodTreePrivate makes every file/dir under root owner-only (files 0600,
+// dirs 0700), the way an operator's mktemp-then-mv tooling leaves a config: the
+// gate's "git" user can then read it only if the bake normalizes modes, which a
+// host bind mount never did.
+func chmodTreePrivate(t *testing.T, root string) {
 	t.Helper()
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			return os.Chmod(path, 0o755)
+			return os.Chmod(path, 0o700)
 		}
-		return os.Chmod(path, 0o644)
+		return os.Chmod(path, 0o600)
 	})
 	if err != nil {
-		t.Fatalf("chmodTreeReadable %s: %v", root, err)
+		t.Fatalf("chmodTreePrivate %s: %v", root, err)
 	}
 }

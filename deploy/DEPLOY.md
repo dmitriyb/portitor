@@ -73,9 +73,14 @@ docker network inspect dca-net >/dev/null 2>&1 || docker network create --intern
 
 ~/Work/portitor/deploy/run.sh \
   --config-dir ~/.dca-keys/portitor-config \
-  --keys ~/.dca-keys/implementer.pub,~/.dca-keys/reviewer.pub,~/.dca-keys/merger.pub
+  --keys "$HOME/.dca-keys/implementer.pub,$HOME/.dca-keys/reviewer.pub,$HOME/.dca-keys/merger.pub"
 docker network connect dca-net portitor           # portitor on bridge (GitHub) + dca-net (agent)
 ```
+
+`run.sh` bakes `portitor-config` into a derived image, validates it as user `git` inside that image, and
+copies the PAT into the container; nothing from the host is mounted. After editing anything under
+`portitor-config`, re-run `run.sh` and then `docker network connect dca-net portitor` again (the
+container is recreated, so it loses the extra network and gets a new SSH host key).
 
 ## 3. Mirror the sandbox
 

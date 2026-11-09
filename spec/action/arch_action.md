@@ -264,6 +264,9 @@ merge/close are simply unavailable through portitor (a human lands out-of-band).
 `internal/action` constructs all `gh` arguments and is the only place portitor shells to `gh`; a
 swappable `Runner` keeps it unit-testable. Deployment wiring lives in `deploy/entrypoint.sh`: it
 installs each agent/role key into `authorized_keys` with the `command="portitor shell <fp>"` forced
-wrapper (`restrict`ed), and gives portitor its GitHub credential from `GH_TOKEN` via `gh auth login`
-+ `gh auth setup-git` — one PAT serving both `gh pr` and `git push upstream`. Richer review payloads
+wrapper (`restrict`ed), and gives portitor its GitHub credential via `gh auth login`
++ `gh auth setup-git` — one PAT serving both `gh pr` and `git push upstream`. The PAT arrives as the
+file `/run/secrets/gh_token`, which `deploy/run.sh` copies into the created container (never an env
+var, never an image layer); the file wins over any `GH_TOKEN` env value, which is honoured only as
+the legacy, inspect-visible fallback when the file is absent. Richer review payloads
 (inline review comments) extend the `pr review` action without changing this model.

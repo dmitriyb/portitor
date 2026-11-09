@@ -1,10 +1,14 @@
 #!/bin/sh
 # portitor container entrypoint: a git-over-SSH gateway + GitHub action mediator.
 #
-# Inputs (env):
-#   GH_TOKEN              portitor's GitHub credential (scoped PAT). Used for both
+# Inputs:
+#   /run/secrets/gh_token portitor's GitHub credential (scoped PAT), a file copied
+#                        into the created container by deploy/run.sh. Used for both
 #                        `gh pr ...` and `git push upstream` (via gh's git
 #                        credential helper). The agent never sees it.
+#   GH_TOKEN (env)       legacy fallback, used only when the file is absent;
+#                        visible in `docker inspect`, so the deploy path no longer
+#                        sets it.
 #   AGENT_AUTHORIZED_KEY one or more agent/role PUBLIC keys (one per line). Each is
 #                        installed with a forced command so the key can ONLY do
 #                        gated git + the role-checked `portitor pr` API.
@@ -21,9 +25,9 @@ PORTITOR_BIN=/usr/local/bin/portitor
 
 ssh-keygen -A # host keys
 
-# GH token: prefer the mounted secret (/run/secrets/gh_token, from compose secrets) so
-# it never lands in the container's env / `docker inspect`; fall back to GH_TOKEN env.
-if [ -z "${GH_TOKEN:-}" ] && [ -f /run/secrets/gh_token ]; then
+# GH token: the file at /run/secrets/gh_token (copied in by deploy/run.sh, or a compose
+# secret) wins over any GH_TOKEN env, which stays only as the legacy fallback.
+if [ -f /run/secrets/gh_token ]; then
 	GH_TOKEN="$(cat /run/secrets/gh_token)"
 fi
 

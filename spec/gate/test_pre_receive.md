@@ -69,3 +69,17 @@ exit-code → push-rejection mapping, and that the rejection reasons surface to 
 An `unsigned-or-untrusted-commit` violation for a commit git reports as `U` (good signature,
 signer not in `allowed_signers`) includes the signer's `%GF` fingerprint in the detail — exactly
 the value the operator adds to `allowed_signers` or the `roles` map to resolve the rejection.
+
+## Deploy path (`deploy_runsh_test.go`)
+
+`deploy/run.sh` runs for real against a fake `docker` on `PATH` that records every call. It must
+bake the config dir with modes normalized (`0644`, `0755` for directories and executables) and
+without `.lock` or dot-prefixed entries; validate each repo config with `portitor validate-config`
+as user `git` inside the built image before any container exists; create the container from the
+image ID the build printed, with no host path mounted; copy the PAT to `/run/secrets/gh_token`
+before `start`, with the host copy already gone; keep the PAT out of every docker argv, every
+docker CLI's environment, and its own output; follow symlinks when baking; and remove its
+temporary files. A failed validation touches no container (no `rm`, `create`, `cp` or `start`);
+build output without an image ID creates nothing; a failed copy or start removes the created
+container. Each of these properties fails the test when removed from the script, including a
+revert to a `-v <config>:/etc/portitor:ro` mount or any `-e GH_TOKEN` form.

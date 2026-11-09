@@ -2,11 +2,12 @@
 # checks, forwarding accepted feature branches to a real upstream.
 #
 # Build:  docker build -t portitor .
-# Run:    docker run -d --name portitor -p 2222:22 \
-#             -e AGENT_AUTHORIZED_KEY="$(cat agent_push_key.pub)" \
-#             -v portitor-config:/etc/portitor:ro -v portitor-repos:/srv/git portitor
-# Provision a repo (place /etc/portitor/repos.d/myrepo.json first; config lives
-# in the registry, the single identity the gate + pr API both read):
+# Run:    deploy/run.sh --config-dir <dir with repos.d/> --keys <role *.pub,...>
+#         It bakes the config into a derived image (used by ID) and copies the
+#         GitHub PAT into the created container at /run/secrets/gh_token, so no host
+#         path is mounted and the PAT is never an env var or an image layer.
+# Provision a repo (its config at /etc/portitor/repos.d/myrepo.json, baked by run.sh;
+# config lives in the registry, the single identity the gate + pr API both read):
 #         docker exec -u git portitor portitor add-repo \
 #             --repo myrepo --upstream https://github.com/you/myrepo.git
 
@@ -27,6 +28,8 @@ RUN apk add --no-cache git openssh-server tini github-cli \
     # login to a locked account ("invalid user"). Mark it valid-but-passwordless.
     && sed -i 's/^git:!/git:*/' /etc/shadow \
     && mkdir -p /srv/git /home/git/.ssh \
+    # deploy/run.sh copies the PAT here into the created container before start
+    && mkdir -m 0700 /run/secrets \
     && chown -R git:git /srv/git /home/git \
     && chmod 700 /home/git/.ssh \
     # key-only sshd

@@ -150,7 +150,7 @@
     },
     {
       "name": "Container",
-      "description": "Deployment: a multi-stage Dockerfile builds the static portitor binary and runs it in a minimal Alpine image as a key-only git-over-SSH server (user 'git', repos on the /srv/git volume). deploy/entrypoint.sh generates host keys, installs AGENT_AUTHORIZED_KEY, and runs sshd under tini. The proxy is its own container, separate from the agent image.",
+      "description": "Deployment: a multi-stage Dockerfile builds the static portitor binary and runs it in a minimal Alpine image as a key-only git-over-SSH server (user 'git', repos on the /srv/git volume). deploy/entrypoint.sh generates host keys, installs AGENT_AUTHORIZED_KEY, and runs sshd under tini. The container shares no host path: deploy/run.sh bakes the operator's whole config dir (minus .lock and dot-prefixed entries) into a derived image at /etc/portitor, root-owned and world-readable, validates every repo config with portitor validate-config as user git inside that image, creates the container from the image by ID, and delivers the GitHub PAT as /run/secrets/gh_token with docker cp into the created container — never as an env var or an image layer. Nothing the gate reads depends on host file ownership, which is what a userns-remapped daemon requires; a config change is a new image and a recreated container. The proxy is its own container, separate from the agent image.",
       "content": "arch_pre_receive.md",
       "implements": []
     }

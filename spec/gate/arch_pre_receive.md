@@ -225,7 +225,17 @@ version idempotently, reading the config path from the existing shim — the re-
 when the CLI's shim contract evolves. The hook subcommand names (`pre-receive`, `post-receive`) are
 a frozen compatibility surface: renaming one would strand every already-provisioned repo. The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
 key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
-sshd under tini) — separate from the agent image, which holds no upstream credential.
+sshd under tini) — separate from the agent image, which holds no upstream credential. The container
+shares **no host path**: `deploy/run.sh` bakes the operator's whole config dir (minus `.lock` and
+dot-prefixed entries) into a derived image at `/etc/portitor` — root-owned, world-readable (`0644`,
+`0755` for directories and executables) — runs `portitor validate-config` for every repo config as
+user `git` inside that image, creates the container from it by image ID, and copies the GitHub PAT
+to `/run/secrets/gh_token` before starting it, so the credential is never an env var nor an image
+layer. Nothing the gate reads depends on host file ownership — the property a userns-remapped
+daemon needs — and a repo config that is invalid, unreadable by `git`, or names a missing
+`allowed_signers` is refused before the running container is touched. A config change is a new
+image and a recreated container (with a regenerated SSH host key); it no longer reaches a
+running gate by itself.
 
 Once a repo is provisioned, `portitor add-role` fills in its role map re-runnably — binding a signer
 fingerprint to a role (and optionally trusting a signing role's public key in `allowed_signers`)
