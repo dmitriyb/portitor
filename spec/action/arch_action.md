@@ -262,11 +262,14 @@ merge/close are simply unavailable through portitor (a human lands out-of-band).
 ## Boundaries
 
 `internal/action` constructs all `gh` arguments and is the only place portitor shells to `gh`; a
-swappable `Runner` keeps it unit-testable. Deployment wiring lives in `deploy/entrypoint.sh`: it
-installs each agent/role key into `authorized_keys` with the `command="portitor shell <fp>"` forced
-wrapper (`restrict`ed), and gives portitor its GitHub credential via `gh auth login`
-+ `gh auth setup-git` — one PAT serving both `gh pr` and `git push upstream`. The PAT arrives as the
-file `/run/secrets/gh_token`, which `deploy/run.sh` copies into the created container (never an env
-var, never an image layer); the file wins over any `GH_TOKEN` env value, which is honoured only as
-the legacy, inspect-visible fallback when the file is absent. Richer review payloads
+swappable `Runner` keeps it unit-testable. Deployment wiring lives in the gate's entrypoint (see
+spec/gate/arch_pre_receive.md): it installs each agent/role key into `authorized_keys` with the
+`command="portitor shell <fp>"` forced wrapper (`restrict`ed). portitor never logs in to GitHub. Its
+credential is the file `/run/secrets/gh_token`, which `portitor deploy` copies into the created
+container (never an env var, never an image layer), read per call: the default `Runner` sets
+`GH_TOKEN` on the `gh` child only, network `git` (`git push upstream`, the fetches) authenticates
+through the `portitor git-credential` helper, and `merge_gate.checks` predicates get `GH_TOKEN`
+through the check trampoline. One PAT serves all three. An empty file fails the call loudly; with
+no file at all — `reconcile` or `pr` run on an operator machine — `gh` and `git` keep their
+ambient authentication. Richer review payloads
 (inline review comments) extend the `pr review` action without changing this model.

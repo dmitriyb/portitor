@@ -5,7 +5,7 @@
     {
       "type": "functional",
       "title": "No gh passthrough — constrained mediation only",
-      "description": "Every GitHub action is performed by portitor as a consequence of verified git state or as a narrow, role-validated operation whose target portitor can tie back to managed work. gh arguments are constructed by portitor (internal/action), never forwarded from the agent, so the agent cannot run arbitrary gh."
+      "description": "Every GitHub action is performed by portitor as a consequence of verified git state or as a narrow, role-validated operation whose target portitor can tie back to managed work. gh arguments are constructed by portitor (internal/action), never forwarded from the agent, so the agent cannot run arbitrary gh. portitor holds its credential as the gate's file /run/secrets/gh_token and passes it per call — GH_TOKEN on the gh child only, the git credential helper for network git — never by logging in; with no such file (an operator machine) gh's ambient authentication applies unchanged."
     },
     {
       "type": "functional",
@@ -35,7 +35,7 @@
     {
       "type": "functional",
       "title": "SSH forced-command dispatch (portitor shell)",
-      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND against a closed table: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs, with the caller fingerprint exported to the subprocess environment for audit attribution; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; `portitor mcp` (exactly two tokens) splices the connection's stdio to the portitor-mcp mediator with the fingerprint asserted in the splice header (the mcp module's surface, at its own weaker tier); everything else — including git-upload-archive — is rejected. One key thus grants gated git + the narrow action API + the shape-validated MCP splice and nothing more."
+      "description": "`portitor shell <fingerprint>` is the forced command on an agent key's authorized_keys entry. It classifies SSH_ORIGINAL_COMMAND against a closed table: git-receive-pack/upload-pack '<path>' (confined to the repo root, *.git, no traversal) execs the real git command so the pre/post-receive gate runs — only on a provisioned repo (both hook shims baked, no core.hooksPath override; any other repo is refused) — with the caller fingerprint exported to the subprocess environment for audit attribution; `portitor pr ...` runs the role-gated action API with the role mapped from the key fingerprint; `portitor mcp` (exactly two tokens) splices the connection's stdio to the portitor-mcp mediator with the fingerprint asserted in the splice header (the mcp module's surface, at its own weaker tier); everything else — including git-upload-archive — is rejected. One key thus grants gated git + the narrow action API + the shape-validated MCP splice and nothing more."
     },
     {
       "type": "non-functional",
@@ -66,7 +66,7 @@
   "components": [
     {
       "name": "ActionClient",
-      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Describe, Review, Merge, ClosePR, Fetch, FetchMergeState, Checks, FetchRunState, ExecuteRerun, FailedJobLogs) pinned to one repo slug via -R (or the REST path/GraphQL variables for gh api calls), plus the pure evaluators UnmetMergePreconditions, BuildChecksReport, and PlanRerun; a swappable Runner makes it testable with stubbed gh.",
+      "description": "internal/action.GH: typed wrappers over gh (OpenPR, OpenPRNumber, Comment, Describe, Review, Merge, ClosePR, Fetch, FetchMergeState, Checks, FetchRunState, ExecuteRerun, FailedJobLogs) pinned to one repo slug via -R (or the REST path/GraphQL variables for gh api calls), plus the pure evaluators UnmetMergePreconditions, BuildChecksReport, and PlanRerun; a swappable Runner makes it testable with stubbed gh. The default Runner sets GH_TOKEN on the gh child from the gate's credential file when it exists (an empty file fails the call).",
       "content": "arch_action.md",
       "implements": []
     },
@@ -84,7 +84,7 @@
     },
     {
       "name": "ShellDispatcher",
-      "description": "`portitor shell <fingerprint>`: classify() routes SSH_ORIGINAL_COMMAND to git pack (exec, gate runs) or the role-gated pr API (role from fingerprint), rejecting anything else; allowedRepoPath confines pack commands.",
+      "description": "`portitor shell <fingerprint>`: classify() routes SSH_ORIGINAL_COMMAND to git pack (exec, gate runs) or the role-gated pr API (role from fingerprint), rejecting anything else; allowedRepoPath confines pack commands, and an unprovisioned repo is refused before any git runs.",
       "content": "arch_action.md",
       "implements": []
     }

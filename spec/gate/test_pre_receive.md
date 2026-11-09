@@ -70,16 +70,16 @@ An `unsigned-or-untrusted-commit` violation for a commit git reports as `U` (goo
 signer not in `allowed_signers`) includes the signer's `%GF` fingerprint in the detail — exactly
 the value the operator adds to `allowed_signers` or the `roles` map to resolve the rejection.
 
-## Deploy path (`deploy_runsh_test.go`)
+## Provisioning and serving
 
-`deploy/run.sh` runs for real against a fake `docker` on `PATH` that records every call. It must
-bake the config dir with modes normalized (`0644`, `0755` for directories and executables) and
-without `.lock` or dot-prefixed entries; validate each repo config with `portitor validate-config`
-as user `git` inside the built image before any container exists; create the container from the
-image ID the build printed, with no host path mounted; copy the PAT to `/run/secrets/gh_token`
-before `start`, with the host copy already gone; keep the PAT out of every docker argv, every
-docker CLI's environment, and its own output; follow symlinks when baking; and remove its
-temporary files. A failed validation touches no container (no `rm`, `create`, `cp` or `start`);
-build output without an image ID creates nothing; a failed copy or start removes the created
-container. Each of these properties fails the test when removed from the script, including a
-revert to a `-v <config>:/etc/portitor:ro` mount or any `-e GH_TOKEN` form.
+- `init-repo` whose fetch fails leaves no repo at the target path and no servable path; the next
+  `init-repo` removes the leftover temporary path and succeeds.
+- `init-repo` on an existing target that is not provisioned refuses and leaves its contents
+  untouched.
+- `init-repo` names the upstream remote by the config's `upstream_remote`.
+- `portitor shell` refuses `git-receive-pack` and `git-upload-pack` on a repo missing either
+  shim, or with `core.hooksPath` set, with exit 1 and no git process started.
+- `git-upload-pack` on a provisioned repo without an upstream remote skips the refresh and
+  serves; with an upstream whose fetch fails it still fails the clone.
+
+The container-level checks of the entrypoint run in the docker tier (spec/delivery/test_deploy.md).

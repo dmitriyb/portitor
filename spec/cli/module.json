@@ -5,7 +5,7 @@
     {
       "type": "functional",
       "title": "A cobra command tree with universal help",
-      "description": "A top-level cobra root (cli.NewRootCmd) registers every subcommand — the operator subcommands (init-repo, add-repo, upgrade-repo, reconcile, add-role, validate-config, upgrade, pr) and the machine entrypoints (pre-receive, post-receive, shell, and the hidden internal-check-exec) — mirroring spexmachina's cli/root.go + cmd/spex/*.go split (one newXxxCmd() per subcommand). --help/-h/help print usage to stdout and exit 0 uniformly at the root and at every subcommand, cobra-generated from the registered tree and flag definitions. Help is grouped (gate / provisioning / action channel) to reproduce the old usage() structure. The root has SilenceUsage/SilenceErrors set (main owns error reporting and the exit-code mapping, so a rejected push never prints command usage), and cobra's default `completion` command is disabled so the command set does not grow; the `help` command is kept."
+      "description": "A top-level cobra root (cli.NewRootCmd) registers every subcommand — the operator subcommands (init-repo, add-repo, upgrade-repo, reconcile, add-role, validate-config, upgrade, deploy, pr) and the machine entrypoints (pre-receive, post-receive, shell, git-credential, and the hidden internal-check-exec) — mirroring spexmachina's cli/root.go + cmd/spex/*.go split (one newXxxCmd() per subcommand). --help/-h/help print usage to stdout and exit 0 uniformly at the root and at every subcommand, cobra-generated from the registered tree and flag definitions. Help is grouped (gate / provisioning / action channel) to reproduce the old usage() structure. The root has SilenceUsage/SilenceErrors set (main owns error reporting and the exit-code mapping, so a rejected push never prints command usage), and cobra's default `completion` command is disabled so the command set does not grow; the `help` command is kept."
     },
     {
       "type": "functional",
@@ -25,12 +25,22 @@
     {
       "type": "functional",
       "title": "Self-update subcommand",
-      "description": "`portitor upgrade` self-updates the installed standalone binary by driving the embedded, already-signed install.sh — it does NOT reimplement resolve/download/verify/replace. It resolves the running binary's real path (os.Executable + filepath.EvalSymlinks), writes the embedded script to a private 0600 temp file, and runs `sh <file>` synchronously in upgrade mode against that path, streaming the script's output and propagating its exit code. Upgrade is forward-only: with no flag it resolves the latest signed release and moves toward it; a resolved latest OLDER than installed is a rollback anomaly the script hard-refuses, non-overridable (there is NO --force). Flags: --check/--dry-run (report the latest and change nothing — warns but still exits 0 when latest is older than installed), --version vX.Y.Z (install that exact release in ANY direction incl. older, no anomaly guard; passed via the script's VERSION env — VERSION unset is the forward-only latest path, VERSION set is the explicit named-release path), --rollback (restore <path>.bak). It passes its compiled-in main.version as --current so the forward-only guard does not depend on re-executing the about-to-be-replaced binary. It is registered in the provisioning group, distinct from the pre-existing upgrade-repo command, and its help states it maintains the standalone binary only — the container image is a separate Dockerfile artifact it does not touch. The mechanism it drives is specified by the delivery module's SelfUpdate component; the embedded script is byte-identical to the canonical repo-root install.sh (a go test, TestUpgradeEmbeddedMatchesReleased, enforces the identity)."
+      "description": "`portitor upgrade` self-updates the installed `portitor`/`portitor-gate` pair by driving the embedded, already-signed install.sh — it does NOT reimplement resolve/download/verify/replace. It resolves the running binary's real path (os.Executable + filepath.EvalSymlinks), writes the embedded script to a private 0600 temp file, and runs `sh <file>` synchronously in upgrade mode against that path, streaming the script's output and propagating its exit code. Upgrade is forward-only: with no flag it resolves the latest signed release and moves toward it; a resolved latest OLDER than installed is a rollback anomaly the script hard-refuses, non-overridable (there is NO --force). Flags: --check/--dry-run (report the latest and change nothing — warns but still exits 0 when latest is older than installed), --version vX.Y.Z (install that exact release in ANY direction incl. older, no anomaly guard; passed via the script's VERSION env — VERSION unset is the forward-only latest path, VERSION set is the explicit named-release path), --rollback (restore <path>.bak). It passes its compiled-in main.version as --current so the forward-only guard does not depend on re-executing the about-to-be-replaced binary. It is registered in the provisioning group, distinct from the pre-existing upgrade-repo command, and its help states it maintains the standalone binary only — the container image is a separate Dockerfile artifact it does not touch. The mechanism it drives is specified by the delivery module's SelfUpdate component; the embedded script is byte-identical to the canonical repo-root install.sh (a go test, TestUpgradeEmbeddedMatchesReleased, enforces the identity)."
+    },
+    {
+      "type": "functional",
+      "title": "Deploy subcommand",
+      "description": "`portitor deploy --config <file>` is the thin front-end of the delivery module's Deploy: it parses the one flag, runs the deploy, streams its step-by-step progress to stderr and exits 0 only when the deploy committed (1 on a refusal or failure, naming the step; 2 on a usage error). It reimplements none of the deploy logic."
+    },
+    {
+      "type": "functional",
+      "title": "git credential helper for the gate",
+      "description": "`portitor git-credential get` is the git credential helper the gate configures for https://github.com: it reads the git credential request from stdin and, for host github.com, answers username `x-access-token` and the password from the gate's credential file /run/secrets/gh_token. `store` and `erase` are no-ops. A missing or empty file, or any other host, answers nothing and exits non-zero, so git fails loudly. Standard library only."
     },
     {
       "type": "non-functional",
       "title": "cobra is a compile-time dependency only",
-      "description": "github.com/spf13/cobra (version matching spexmachina) is added to go.mod, pulling in github.com/spf13/pflag and github.com/inconshreveable/mousetrap as indirects. cobra is a build-time library baked into the binary; it does not change portitor's only-runtime-dependency-is-git property — the running binary still needs only git on the host. cobra is confined to the CLI layer (cli/, cmd/portitor/); the gate, rules, and check modules do not import it."
+      "description": "github.com/spf13/cobra (version matching spexmachina) is added to go.mod, pulling in github.com/spf13/pflag and github.com/inconshreveable/mousetrap as indirects. cobra is a build-time library baked into the binary; it does not change portitor's only-runtime-dependency-is-git property — the running binary still needs only git on the host (`deploy` alone also drives docker and nix, see the delivery module). cobra is confined to the CLI layer (cli/, cmd/portitor/); the gate, rules, and check modules do not import it."
     }
   ],
   "components": [
@@ -48,13 +58,19 @@
     },
     {
       "name": "UpgradeCommand",
-      "description": "`portitor upgrade` — the thin Go front-end (newUpgradeCmd + upgradeRun in cmd/portitor) that self-updates the installed standalone binary by embedding the canonical install.sh and running it in forward-only upgrade mode against the running binary's resolved path. Flags --check/--dry-run, --version, --rollback (no --force — the forward-only anomaly refusal is not overridable); reimplements no update logic (that lives in install.sh — see the delivery module's SelfUpdate). Distinct from upgrade-repo.",
+      "description": "`portitor upgrade` — the thin Go front-end (newUpgradeCmd + upgradeRun in cmd/portitor) that self-updates the installed `portitor`/`portitor-gate` pair by embedding the canonical install.sh and running it in forward-only upgrade mode against the running binary's resolved path. Flags --check/--dry-run, --version, --rollback (no --force — the forward-only anomaly refusal is not overridable); reimplements no update logic (that lives in install.sh — see the delivery module's SelfUpdate). Distinct from upgrade-repo.",
       "content": "arch_upgrade_command.md",
       "implements": []
     },
     {
+      "name": "DeployCommand",
+      "description": "`portitor deploy --config <file>` — the thin Go front-end (newDeployCmd + deployRun in cmd/portitor) of the delivery module's Deploy: parses the flag, runs the deploy, streams progress to stderr, maps its outcome to the exit code. Provisioning group.",
+      "content": "arch_deploy_command.md",
+      "implements": []
+    },
+    {
       "name": "MachineEntrypointDispatch",
-      "description": "The cobra wrapping of the load-bearing entrypoints: pre-receive/post-receive (ArbitraryArgs, stdin, verdict-as-exit-code), shell <fingerprint> (SSH forced command; pr route re-executes the cobra pr command with the connection fingerprint injected), and the hidden internal-check-exec trampoline (DisableFlagParsing, os.Exit). Plus the *exitError plumbing and the usage-error → exit 2 mapping that preserve the process exit-code contract.",
+      "description": "The cobra wrapping of the load-bearing entrypoints: pre-receive/post-receive (ArbitraryArgs, stdin, verdict-as-exit-code), shell <fingerprint> (SSH forced command; pr route re-executes the cobra pr command with the connection fingerprint injected), git-credential (the helper git invokes with stdin), and the hidden internal-check-exec trampoline (DisableFlagParsing, os.Exit). Plus the *exitError plumbing and the usage-error → exit 2 mapping that preserve the process exit-code contract.",
       "content": "arch_machine_entrypoints.md",
       "implements": []
     }

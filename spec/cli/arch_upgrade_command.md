@@ -8,7 +8,7 @@ The `portitor upgrade` subcommand: the thin Go front-end that self-updates the i
 - Resolve the exact on-disk path of the running binary via `os.Executable()` then `filepath.EvalSymlinks` — a symlinked launcher resolves to the real file, which is what the move-aside + rename must target.
 - `//go:embed` the canonical `install.sh` (from the byte-identical package copy `cmd/portitor/install.sh`), write it to a private (0600) temp file, and run `sh <file>` synchronously in upgrade mode against the resolved path. The command is intentionally thin: it reimplements none of the resolve/download/verify/replace logic.
 - Report `old → new` by streaming the script's stdout/stderr through unchanged, and propagate the script's exit code as the process exit code.
-- Update the standalone operator binary only. The container image (gate + egress) is a separate artifact rebuilt from the `Dockerfile`; the help text states this explicitly, so an operator is never misled into thinking `upgrade` touches the deployed image.
+- Update the `portitor`/`portitor-gate` pair only. A running gate keeps its image until the next `portitor deploy`, which bakes the new `portitor-gate`; the help text states this explicitly, so an operator is never misled into thinking `upgrade` touches the deployed gate.
 
 ## Flags
 
@@ -24,7 +24,7 @@ Upgrade is forward-only: with no flag it resolves the latest signed release and 
 
 ## Script invocation contract
 
-The command translates its flags into the script's upgrade-mode flags: it always passes `--upgrade --target <resolved-path>`, appends `--check` / `--rollback` as set, and passes `--current <version>` sourced from the compiled-in `main.version` — the authoritative current version, so the forward-only guard never depends on re-executing the about-to-be-replaced binary (a `dev` build omits it and lets the script probe the target). A pinned `--version` travels to the script via its existing `VERSION` environment contract, not a new flag: `VERSION` unset is exactly what tells the script it is on the forward-only latest path (resolve GitHub's "latest" and refuse a resolved release older than installed), while `VERSION` set names an exact release the script installs in any direction with only an "older than installed, as explicitly requested" notice.
+The command translates its flags into the script's upgrade-mode flags: it always passes `--upgrade --target <resolved-path>`, appends `--check` / `--rollback` as set, passes `--gate-target <path>` (`portitor-gate` beside the resolved path) and `--gate-current <version>` read from that file's build info when it exists (it cannot be executed on a darwin host), and passes `--current <version>` sourced from the compiled-in `main.version` — the authoritative current version, so the forward-only guard never depends on re-executing the about-to-be-replaced binary (a `dev` build omits it and lets the script probe the target). A pinned `--version` travels to the script via its existing `VERSION` environment contract, not a new flag: `VERSION` unset is exactly what tells the script it is on the forward-only latest path (resolve GitHub's "latest" and refuse a resolved release older than installed), while `VERSION` set names an exact release the script installs in any direction with only an "older than installed, as explicitly requested" notice.
 
 ## Exit codes
 

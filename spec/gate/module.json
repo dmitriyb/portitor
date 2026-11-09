@@ -55,7 +55,7 @@
     {
       "type": "functional",
       "title": "Provision a gated bare repo",
-      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (only when upstream has it), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand. Provisioning is fail-loud (remote-add/fetch/seed errors abort; a present-but-invalid config fails here, not at every later push; an absent config is a warning). Shims are written atomically (no partial fail-open stub) and carry a version marker. Without --config the path defaults to the registry (<ReposDir>/<name>.json; a basename failing ValidName is a usage error) — the single canonical config identity every consumer (gate, add-role, pr) reads. `portitor upgrade-repo` re-bakes shims to the current version idempotently; the hook subcommand names are a frozen compatibility surface."
+      "description": "`portitor init-repo --bare <path> [--default <branch>] [--upstream <url>] [--config <json>]` creates a bare repo, optionally adds and fetches an upstream remote and seeds the default branch from it (only when upstream has it), and installs pre-receive/post-receive hook shims that export PORTITOR_CONFIG and exec the matching portitor subcommand. Provisioning is fail-loud (remote-add/fetch/seed errors abort; a present-but-invalid config fails here, not at every later push; an absent config is a warning). Shims are written atomically (no partial fail-open stub) and carry a version marker. Provisioning as a whole is atomic: the repo is built at a temporary path in the target's parent (never ending in `.git`, so it is never servable), fetched, seeded and given its hooks there, and renamed into place only when all of that succeeded; a leftover temporary path is removed by the next provisioning, under a per-repo lock. An existing target that is not provisioned is refused, never overwritten (it may hold accepted, unforwarded branches). The upstream remote is named by the config's upstream_remote (default `upstream`), the name forwarding and the serve refresh use. A repo is provisioned when both its pre-receive and post-receive shims are portitor shims and no core.hooksPath overrides them; `portitor shell` refuses any other repo. Without --config the path defaults to the registry (<ReposDir>/<name>.json; a basename failing ValidName is a usage error) — the single canonical config identity every consumer (gate, add-role, pr) reads. `portitor upgrade-repo` re-bakes shims to the current version idempotently; the hook subcommand names are a frozen compatibility surface."
     },
     {
       "type": "functional",
@@ -114,7 +114,7 @@
     },
     {
       "name": "CheckCommand",
-      "description": "internal/check: the hermetic invocation of the operator-configured record extractor — passes a side's content as data (materialized at the config-declared relative input_file in a private throwaway workdir, or piped to stdin), runs the config-fixed argv under a 30s deadline with RLIMIT_AS applied through the `portitor internal-check-exec` re-exec trampoline, a minimal environment, and an output cap; reads records from the configured records_path/id_field; and distinguishes a non-zero content rejection (a push violation) from a failure to run the contract (an operational error). Knows no tool identity — what fills the seam is deploy config.",
+      "description": "internal/check: the hermetic invocation of the operator-configured record extractor — passes a side's content as data (materialized at the config-declared relative input_file in a private throwaway workdir, or piped to stdin), runs the config-fixed argv under a 30s deadline with RLIMIT_AS applied through the `portitor internal-check-exec` re-exec trampoline, a minimal environment (PATH, HOME; plus GH_TOKEN for merge_gate predicates only, when the gate's credential file exists — content checks never get it), and an output cap; reads records from the configured records_path/id_field; and distinguishes a non-zero content rejection (a push violation) from a failure to run the contract (an operational error). Knows no tool identity — what fills the seam is deploy config.",
       "content": "arch_content_rules.md",
       "implements": []
     },
@@ -138,7 +138,7 @@
     },
     {
       "name": "InitRepoCommand",
-      "description": "The `portitor init-repo` subcommand: creates the gated bare repo, optionally mirrors/seeds from upstream, and installs the pre-receive/post-receive hook shims wired to PORTITOR_CONFIG.",
+      "description": "The `portitor init-repo` subcommand: atomically creates the gated bare repo at a temporary path, optionally mirrors/seeds from upstream under the config's upstream_remote name, installs the pre-receive/post-receive hook shims wired to PORTITOR_CONFIG, and renames it into place; refuses an existing unprovisioned target.",
       "content": "arch_pre_receive.md",
       "implements": []
     },
@@ -150,7 +150,7 @@
     },
     {
       "name": "Container",
-      "description": "Deployment: a multi-stage Dockerfile builds the static portitor binary and runs it in a minimal Alpine image as a key-only git-over-SSH server (user 'git', repos on the /srv/git volume). deploy/entrypoint.sh generates host keys, installs AGENT_AUTHORIZED_KEY, and runs sshd under tini. The container shares no host path: deploy/run.sh bakes the operator's whole config dir (minus .lock and dot-prefixed entries) into a derived image at /etc/portitor, root-owned and world-readable, validates every repo config with portitor validate-config as user git inside that image, creates the container from the image by ID, and delivers the GitHub PAT as /run/secrets/gh_token with docker cp into the created container — never as an env var or an image layer. Nothing the gate reads depends on host file ownership, which is what a userns-remapped daemon requires; a config change is a new image and a recreated container. The proxy is its own container, separate from the agent image.",
+      "description": "The gate's runtime contract inside the image `portitor deploy` builds (see the delivery module's Deploy): the embedded entrypoint (`portitor-entrypoint`, run under tini as root) hands /run/secrets/gh_token to `git` (0400) and refuses to boot without it; configures git's credential helper for https://github.com as `portitor git-credential`; generates the ed25519 host key into the host-key volume only when absent; installs AGENT_AUTHORIZED_KEY with the forced command; validates every repo config as `git`; provisions, as `git` via setpriv (HOME/USER/LOGNAME set, supplementary groups reset), every registry repo that is not provisioned, with its upstream from upstream_slug when set; then execs sshd. It never logs in to GitHub: the token is read per call. The container's only mounts are the mirror and host-key volumes; the config is image content at /etc/portitor.",
       "content": "arch_pre_receive.md",
       "implements": []
     }

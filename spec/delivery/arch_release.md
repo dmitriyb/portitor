@@ -17,7 +17,8 @@ matrix.
 `.goreleaser.yaml`'s `builds` entries compile `./cmd/portitor` and `./cmd/portitor-mcp` for the
 four-target matrix (`linux`/`darwin` × `amd64`/`arm64`), each with:
 
-- `CGO_ENABLED=0` — matches the Dockerfile's static build, no libc dependency to cross-compile.
+- `CGO_ENABLED=0` — a static binary, so the same linux archive runs on a host and as the gate
+  inside the Nix image, with no libc dependency to cross-compile.
 - `-trimpath` and ldflags `-s -w` — no build-machine paths or symbol table in the shipped binary.
 - ldflags `-X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}` — stamps
   the three vars `cmd/portitor/version.go` declares (default `"dev"`/`"none"`/`"unknown"` for a
@@ -167,10 +168,9 @@ and `generate-manifest.sh` run against the real `dist/artifacts.json`/`metadata.
 
 ## Boundaries
 
-This module ships binaries only. The Dockerfile builds the same `CGO_ENABLED=0 go build` binary
-into a minimal Alpine image, but that image is never built or pushed by this pipeline — the
-operator runs `docker build -t portitor .` themselves, locally, against the tagged source (see
-`README.md`'s Quickstart). No package-manager formula (Homebrew/Scoop/AUR) and no cross-repo
+This module ships binaries only. The gate image is never built or pushed by this pipeline:
+`portitor deploy` builds it on the operator's host with Nix, around the released linux binary that
+`install.sh` installs as `portitor-gate` (see `arch_deploy.md`). No package-manager formula (Homebrew/Scoop/AUR) and no cross-repo
 checksum-dispatch notification are in scope: the templates this pipeline was adapted from
 (beads_viewer, beads_rust) both couple to infrastructure — a homebrew-tap repo, an ACFS
 installer-notification repo — that has no portitor equivalent, and building one for a hypothetical
