@@ -764,7 +764,7 @@ func TestGateAccept_PATCannotWriteWorkflows(t *testing.T) {
 
 // mergeViewFields is the query the gate's `pr merge` makes
 // (internal/action GH.FetchMergeState).
-const mergeViewFields = "reviewDecision,mergeStateStatus,headRefName,headRefOid,statusCheckRollup"
+const mergeViewFields = "reviewDecision,mergeStateStatus,headRefName,headRefOid"
 
 // logMergeViews records what GitHub answers about pr from the runner and from
 // inside the gate — the gate's own query and the bare mergeStateStatus one, with

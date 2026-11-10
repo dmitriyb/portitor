@@ -59,7 +59,8 @@ Three more problems surface on the way:
       secret fails the run in CI.
 
     The acceptance PAT reaches the test step's env only. It is limited to Contents, Pull
-    requests and Actions on one private disposable repo, with no Workflows permission: it can
+    requests, Actions and Commit statuses on one private disposable repo, with no Workflows
+    permission: it can
     run the workflows the repo already has, never add one, and a test proves GitHub refuses
     it. The repo's seed, workflow included, is prepared once by the operator. No acceptance
     scenario is skipped in CI. This replaces "user-run only, never CI" from

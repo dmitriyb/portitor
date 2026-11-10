@@ -67,9 +67,10 @@ branch but the default, and force-moves the default branch to the tag.
 
 **One credential, bounded by what GitHub refuses.** `PORTITOR_ACCEPT_PAT` (a repository secret)
 is a fine-grained PAT on the disposable repo only, with Contents, Pull requests and Actions
-(read/write) and no Workflows permission. Contents and Pull requests are what the gate's own
-credential needs to forward branches, open, review and merge pull requests; Actions is what the
-Actions proxy needs to read runs and re-run jobs. A leaked PAT can therefore push to a repo
+(read/write), Commit statuses (read) and no Workflows permission — the permissions the gate's own
+credential needs (spec/action/arch_action.md): Contents and Pull requests to forward branches,
+open, review and merge pull requests; Actions and Commit statuses to read a head's checks, and
+Actions to re-run jobs. A leaked PAT can therefore push to a repo
 every scenario resets, and re-run the seed's own workflow — never add a workflow that runs code
 of its choosing. `TestGateAccept_PATCannotWriteWorkflows` pushes a new workflow with it and fails
 the moment GitHub accepts it, so that bound is checked on every run instead of assumed.

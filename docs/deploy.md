@@ -53,6 +53,8 @@ A deploy config, host-local and without secrets (all fields: `spec/delivery/arch
 portitor deploy --config deploy.json
 ```
 
+The PAT should be fine-grained and limited to the repos the gate serves, with Contents and Pull requests (read/write), Actions (read; write if any role may `rerun`) and Commit statuses (read). portitor never uses the Checks API, which GitHub refuses to fine-grained PATs; check runs posted by other GitHub Apps are therefore not visible to it.
+
 `token_command` is any argv that prints the GitHub PAT — `secret-tool lookup …`, `systemd-creds decrypt --user …`, `security find-generic-password …`; portitor never learns where you keep it. `image.packages` and `image.overlay` add the tools your own policy's check commands call (nixpkgs attribute names; an overlay for anything outside nixpkgs); portitor's own runtime is fixed.
 
 `portitor deploy` builds the image (skipped when its content hash already exists), validates every repo config as user `git` inside it, checks the host key against the pin, reads the PAT, creates the new gate under a temporary name, copies the PAT into it as `/run/secrets/gh_token` and reads it back, then stops the previous gate, starts the new one, waits for its sshd and verifies the result by reading it back: running, exactly the mirror and host-key volumes mounted, no `GH_TOKEN` env, the token file `git`-owned `0400`, the served host key equal to the pin, and GitHub accepting the PAT for every repo with an `upstream_slug`. Only then is the previous gate removed. Any failure before the swap leaves the previous gate untouched; any failure after it restores and restarts the previous gate. Volumes are never removed.

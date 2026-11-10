@@ -527,16 +527,21 @@ func TestClosePR(t *testing.T) {
 }
 
 func TestFetchMergeState(t *testing.T) {
-	run, last := stub(`{"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN","headRefName":"feat","headRefOid":"deadbeef","statusCheckRollup":[{"name":"ci/test","conclusion":"SUCCESS"}]}`, nil)
+	run, last := stub(`{"reviewDecision":"APPROVED","mergeStateStatus":"CLEAN","headRefName":"feat","headRefOid":"deadbeef"}`, nil)
 	st, err := (GH{Repo: "o/r", Run: run}).FetchMergeState(5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.ReviewDecision != "APPROVED" || st.MergeStateStatus != "CLEAN" || st.HeadRefName != "feat" || st.HeadSHA != "deadbeef" || len(st.StatusCheckRollup) != 1 {
+	if st.ReviewDecision != "APPROVED" || st.MergeStateStatus != "CLEAN" || st.HeadRefName != "feat" || st.HeadSHA != "deadbeef" {
 		t.Fatalf("state = %+v", st)
 	}
 	if got := strings.Join(*last, " "); !strings.Contains(got, "pr view 5") || !strings.Contains(got, "mergeStateStatus") || !strings.Contains(got, "headRefOid") {
 		t.Fatalf("args = %q", got)
+	}
+	// statusCheckRollup reads check runs through the Checks API, which GitHub
+	// refuses to fine-grained PATs: asking for it breaks every PR that has checks.
+	if got := strings.Join(*last, " "); strings.Contains(got, "statusCheckRollup") {
+		t.Fatalf("merge state asks for statusCheckRollup: %q", got)
 	}
 }
 
@@ -553,7 +558,7 @@ var (
 // is gone (see 2026-08-05-transparent-approve).
 func TestUnmetMergePreconditionsMatrix(t *testing.T) {
 	clean := MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN",
-		StatusCheckRollup: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
+		Checks: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
 
 	cases := []struct {
 		name           string
@@ -600,7 +605,7 @@ func TestUnmetMergePreconditionsMatrix(t *testing.T) {
 // unaffected by the review source.
 func TestUnmetMergePreconditionsCleanAndChecks(t *testing.T) {
 	clean := MergeState{ReviewDecision: "APPROVED", MergeStateStatus: "CLEAN",
-		StatusCheckRollup: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
+		Checks: []CheckRun{{Name: "ci/test", Conclusion: "SUCCESS"}}}
 
 	for _, state := range []string{"", "BEHIND", "DIRTY", "BLOCKED", "UNSTABLE", "UNKNOWN"} {
 		st := clean
@@ -614,19 +619,19 @@ func TestUnmetMergePreconditionsCleanAndChecks(t *testing.T) {
 		}
 	}
 	failed := clean
-	failed.StatusCheckRollup = []CheckRun{{Name: "ci/test", Conclusion: "FAILURE"}}
+	failed.Checks = []CheckRun{{Name: "ci/test", Conclusion: "FAILURE"}}
 	if unmet, err := UnmetMergePreconditions(failed, []string{"ci/test"}, noneOK, nil); err != nil || len(unmet) == 0 {
 		t.Fatalf("failed required check must be unmet, got unmet=%v err=%v", unmet, err)
 	}
 	// Legacy status contexts (context/state shape) also count.
 	legacy := clean
-	legacy.StatusCheckRollup = []CheckRun{{Context: "ci/legacy", State: "SUCCESS"}}
+	legacy.Checks = []CheckRun{{Context: "ci/legacy", State: "SUCCESS"}}
 	if unmet, err := UnmetMergePreconditions(legacy, []string{"ci/legacy"}, noneOK, nil); err != nil || len(unmet) != 0 {
-		t.Fatalf("legacy status context should satisfy: unmet=%v err=%v", unmet, err)
+		t.Fatalf("commit status should satisfy: unmet=%v err=%v", unmet, err)
 	}
 	// Deny-wins across duplicate same-name entries: one green + one red = unmet.
 	dup := clean
-	dup.StatusCheckRollup = []CheckRun{
+	dup.Checks = []CheckRun{
 		{Name: "ci/test", Conclusion: "SUCCESS"},
 		{Name: "ci/test", Conclusion: "FAILURE"},
 	}

@@ -577,32 +577,33 @@ func (g GH) FetchReviewThreads(pr int) ([]ReviewThread, error) {
 }
 
 // MergeState is the authoritative GitHub-side state a merge decision re-derives
-// from — fetched in one query, never trusted from the request.
+// from — never trusted from the request. Checks is filled separately
+// (FetchHeadChecks), and only when something needs it.
 type MergeState struct {
-	ReviewDecision    string     `json:"reviewDecision"`
-	MergeStateStatus  string     `json:"mergeStateStatus"`
-	HeadRefName       string     `json:"headRefName"`
-	HeadSHA           string     `json:"headRefOid"` // the PR's current head commit — pins the merge (see GH.Merge)
-	StatusCheckRollup []CheckRun `json:"statusCheckRollup"`
+	ReviewDecision   string     `json:"reviewDecision"`
+	MergeStateStatus string     `json:"mergeStateStatus"`
+	HeadRefName      string     `json:"headRefName"`
+	HeadSHA          string     `json:"headRefOid"` // the PR's current head commit — pins the merge (see GH.Merge)
+	Checks           []CheckRun `json:"-"`
 }
 
-// CheckRun is one entry of statusCheckRollup. GitHub mixes two shapes (check
-// runs and legacy status contexts); Name/Context and Conclusion/State are the
-// respective pairs. The remaining fields are check-run-shape only (the wire
-// always carried them; the checks verb surfaces them — see checks.go):
-// Status/StartedAt/CompletedAt/WorkflowName describe the run's progress, and
-// DetailsURL embeds the owning run/job ids the gate parses out (runJobIDs) so
-// a caller never has to.
+// CheckRun is one check on a head commit, from one of the two sources a
+// fine-grained PAT can read (the Checks API is closed to it): an Actions job
+// (Name, Status, Conclusion, timing, its workflow, run and job ids and the
+// run's attempt) or a commit status (Context and State). Status, Conclusion and
+// State are upper-cased, so callers see one vocabulary for both.
 type CheckRun struct {
-	Name         string `json:"name"`
-	Context      string `json:"context"`
-	Conclusion   string `json:"conclusion"`
-	State        string `json:"state"`
-	Status       string `json:"status"`
-	StartedAt    string `json:"startedAt"`
-	CompletedAt  string `json:"completedAt"`
-	WorkflowName string `json:"workflowName"`
-	DetailsURL   string `json:"detailsUrl"`
+	Name         string
+	Context      string
+	Conclusion   string
+	State        string
+	Status       string
+	StartedAt    string
+	CompletedAt  string
+	WorkflowName string
+	RunID        int64
+	JobID        int64
+	RunAttempt   int
 }
 
 // checkName returns the entry's identifying name across both shapes.
@@ -622,10 +623,12 @@ func (c CheckRun) succeeded() bool {
 	return strings.EqualFold(v, "SUCCESS")
 }
 
-// FetchMergeState re-derives the PR's merge-relevant state in one query.
+// FetchMergeState re-derives the PR's merge-relevant state in one query. It
+// never asks for statusCheckRollup: that field reads check runs through the
+// Checks API, which GitHub refuses to fine-grained PATs.
 func (g GH) FetchMergeState(pr int) (MergeState, error) {
 	out, err := g.run("pr", "view", strconv.Itoa(pr), "--json",
-		"reviewDecision,mergeStateStatus,headRefName,headRefOid,statusCheckRollup")
+		"reviewDecision,mergeStateStatus,headRefName,headRefOid")
 	if err != nil {
 		return MergeState{}, err
 	}
@@ -678,11 +681,11 @@ func UnmetMergePreconditions(st MergeState, requiredChecks []string, review Revi
 		unmet = append(unmet, fmt.Sprintf("merge state is %q, want CLEAN (covers behind-base, conflicts, blocked)", st.MergeStateStatus))
 	}
 	for _, want := range requiredChecks {
-		// Deny-wins across duplicates: if several rollup entries share the
-		// required name (e.g. two apps reporting one context), every one of
-		// them must be green.
+		// Deny-wins across duplicates: if several checks share the required
+		// name (a job in two workflows, a job and a status context), every one
+		// of them must be green.
 		found, failed := false, false
-		for _, c := range st.StatusCheckRollup {
+		for _, c := range st.Checks {
 			if c.checkName() == want {
 				found = true
 				if !c.succeeded() {
@@ -692,7 +695,7 @@ func UnmetMergePreconditions(st MergeState, requiredChecks []string, review Revi
 		}
 		switch {
 		case !found:
-			unmet = append(unmet, fmt.Sprintf("required check %q is missing from the PR's checks", want))
+			unmet = append(unmet, fmt.Sprintf("required check %q is missing from the head's Actions jobs and commit statuses (check runs of other GitHub Apps are not visible to a fine-grained PAT)", want))
 		case failed:
 			unmet = append(unmet, fmt.Sprintf("required check %q is not successful", want))
 		}

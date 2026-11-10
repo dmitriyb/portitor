@@ -535,7 +535,7 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		}
 		fmt.Fprint(out, res)
 	case "merge":
-		st, err := gh.FetchMergeState(prNum)
+		st, err := mergeState(gh, prNum, s.RequiredChecks)
 		if err != nil {
 			return fail(err)
 		}
@@ -599,6 +599,18 @@ func resolveGateThreads(gh action.GH, pr int) error {
 		}
 	}
 	return nil
+}
+
+// mergeState re-derives the PR's merge state, reading its head's checks only
+// when required_checks needs them, so a config with none never depends on the
+// CI read permissions at all.
+func mergeState(gh action.GH, pr int, requiredChecks []string) (action.MergeState, error) {
+	st, err := gh.FetchMergeState(pr)
+	if err != nil || len(requiredChecks) == 0 {
+		return st, err
+	}
+	st.Checks, err = gh.FetchHeadChecks(st.HeadSHA)
+	return st, err
 }
 
 // runMergeChecks runs each configured merge_gate.checks command as a merge

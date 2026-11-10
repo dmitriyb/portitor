@@ -101,8 +101,10 @@ This document is the practical reference: the schema by example, `allowed_signer
   // to them. Absent = every role is a signing role.
   "identity_only_roles": ["merger"],
 
-  // Optional. Checks that must be green before a merge (matched against the PR's
-  // statusCheckRollup). Empty/absent = advisory.
+  // Optional. Checks that must be green before a merge: Actions job names or
+  // commit-status contexts on the PR's head (the PAT needs Actions and Commit
+  // statuses read; check runs of other GitHub Apps are not visible to a
+  // fine-grained PAT). Empty/absent = advisory, and no checks are read.
   "required_checks": ["ci/test"],
 
   // Optional. The git remote (added by init-repo) accepted branches forward to.
