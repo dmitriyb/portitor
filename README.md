@@ -34,7 +34,7 @@ Every domain name (roles, protected paths, record fields, the record-extraction 
 
 ## Install
 
-Download the install script, verify it, then run it. Never `curl | sh`: a piped script cannot verify itself before it runs. The container image (gate + egress) is not a release artifact: build it from this repository's `Dockerfile` with `docker build -t portitor .`. Details, other shells and the trust model are in [`docs/install.md`](docs/install.md).
+Download the install script, verify it, then run it. Never `curl | sh`: a piped script cannot verify itself before it runs. It installs `portitor` and, beside it, `portitor-gate`, the linux build `portitor deploy` bakes into the gate image; that image is not a release artifact but a local Nix build. Details, other shells and the trust model are in [`docs/install.md`](docs/install.md).
 
 ```bash
 curl -fsSL https://github.com/dmitriyb/portitor/releases/latest/download/install.sh     -o install.sh \
@@ -87,7 +87,7 @@ git push ../demo.git HEAD:refs/heads/feature-unsigned             # rejected: un
 git push ../demo.git HEAD~1:refs/heads/main                       # rejected: no-push-to-default
 ```
 
-That is the gate in one sitting: a signed commit on a feature branch lands, an unsigned one is refused by name, and a push to the default branch is refused whatever it carries. With `--upstream` set on `init-repo`, an accepted branch is forwarded and its PR number is printed back over the push. The deployed shape, the gate in a container reached over SSH with an upstream on GitHub, is four commands in [`docs/deploy.md`](docs/deploy.md): `docker build`, `deploy/run.sh`, `add-repo`, `add-role`.
+That is the gate in one sitting: a signed commit on a feature branch lands, an unsigned one is refused by name, and a push to the default branch is refused whatever it carries. With `--upstream` set on `init-repo`, an accepted branch is forwarded and its PR number is printed back over the push. The deployed shape, the gate in a container reached over SSH with an upstream on GitHub, is two steps in [`docs/deploy.md`](docs/deploy.md): bind roles with `add-role` in the host's config dir, then `portitor deploy`, which builds the gate image, replaces the gate with a verified one, and provisions each repo at boot.
 
 ## How it compares
 
@@ -102,12 +102,11 @@ The argument in one line: trust the gate, not the agent. A tricked agent, a bugg
 
 ## Learn more
 
-- [`docs/deploy.md`](docs/deploy.md) — registry, container bring-up, provisioning, the MCP mediator.
+- [`docs/deploy.md`](docs/deploy.md) — registry, `portitor deploy`, provisioning, the MCP mediator.
 - [`docs/configuration.md`](docs/configuration.md) — the per-repo config schema, `allowed_signers`, content rules, the multi-repo registry.
 - [`docs/commands.md`](docs/commands.md) — the full command reference and the `pr` action API.
 - [`docs/architecture.md`](docs/architecture.md) — how the gate decides, the three enforcement tiers, links to the spec.
 - [`docs/install.md`](docs/install.md) — every install channel, the public key, upgrading.
-- [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — a live end-to-end runbook against a real GitHub sandbox.
 - `spec/**` — the authoritative, requirement-level specification (spexmachina format).
 
 ## License

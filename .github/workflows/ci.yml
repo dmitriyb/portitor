@@ -45,3 +45,33 @@ jobs:
       - name: Test (race)
         if: github.event_name == 'push'
         run: go test -race ./...
+
+  # A real daemon under userns-remap and a real nix build of the gate image:
+  # the property `portitor deploy` exists for (no host path, the PAT only as a
+  # copied-in file) holds only if it holds here.
+  docker:
+    name: docker tier (userns-remap)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.4/install
+
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('internal/deploy/image.go', 'internal/deploy/image.nix.tmpl') }}
+
+      - name: Enable userns-remap
+        run: scripts/ci-userns-remap.sh
+
+      - name: Docker tier
+        env:
+          PORTITOR_REQUIRE_USERNS: "1"
+        run: go test -tags docker -run DockerTier -v -timeout 40m ./cmd/portitor/

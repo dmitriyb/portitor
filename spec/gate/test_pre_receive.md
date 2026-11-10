@@ -69,3 +69,17 @@ exit-code → push-rejection mapping, and that the rejection reasons surface to 
 An `unsigned-or-untrusted-commit` violation for a commit git reports as `U` (good signature,
 signer not in `allowed_signers`) includes the signer's `%GF` fingerprint in the detail — exactly
 the value the operator adds to `allowed_signers` or the `roles` map to resolve the rejection.
+
+## Provisioning and serving
+
+- `init-repo` whose fetch fails leaves no repo at the target path and no servable path; the next
+  `init-repo` removes the leftover temporary path and succeeds.
+- `init-repo` on an existing target that is not provisioned refuses and leaves its contents
+  untouched.
+- `init-repo` names the upstream remote by the config's `upstream_remote`.
+- `portitor shell` refuses `git-receive-pack` and `git-upload-pack` on a repo missing either
+  shim, or with `core.hooksPath` set, with exit 1 and no git process started.
+- `git-upload-pack` on a provisioned repo without an upstream remote skips the refresh and
+  serves; with an upstream whose fetch fails it still fails the clone.
+
+The container-level checks of the entrypoint run in the docker tier (spec/delivery/test_deploy.md).

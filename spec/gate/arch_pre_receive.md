@@ -213,7 +213,16 @@ subcommand). Without `--config` the path defaults to the **registry** —
 (see `arch_config.md`).
 
 Provisioning is fail-loud, not best-effort: a remote-add / fetch / seed error aborts (never bakes a
-gate that cannot forward); the default branch is seeded only when upstream actually has it. The hook
+gate that cannot forward); the default branch is seeded only when upstream actually has it. It is
+also **atomic**: the repo is built at a temporary path in the target's parent (`.<name>.provisioning`,
+which never ends in `.git` and so is never servable), fetched, seeded and given its hooks there, and
+renamed into place only when all of that succeeded. A leftover temporary path is removed by the next
+provisioning under a per-repo flock; an existing target that is not provisioned is refused, never
+overwritten, because it may hold accepted, unforwarded branches. The upstream remote is named by the
+config's `upstream_remote` (default `upstream`), the name forwarding and the serve refresh read. A
+repo is **provisioned** when both hook shims are portitor shims (`bakedHookConfig` on each) and no
+`core.hooksPath` overrides them; `portitor shell` refuses every other repo (see
+`spec/cli/arch_machine_entrypoints.md`). The hook
 shims are written **atomically** (temp-then-rename) so a partial write can never leave an executable
 stub that exits 0 and accepts every push, and each shim carries a **version marker**
 (`# portitor-hook-version: N`) — a frozen compatibility surface. If the baked config is present it
@@ -223,9 +232,29 @@ push); an absent config is a loud warning (a bootstrap may place it next).
 `portitor upgrade-repo --repo <name>` (or `--bare <path>`) re-bakes the hook shims to the current
 version idempotently, reading the config path from the existing shim — the re-provisioning path
 when the CLI's shim contract evolves. The hook subcommand names (`pre-receive`, `post-receive`) are
-a frozen compatibility surface: renaming one would strand every already-provisioned repo. The proxy ships as **its own container** (multi-stage `Dockerfile` → minimal Alpine,
-key-only git-over-SSH as user `git`, repos on the `/srv/git` volume; `deploy/entrypoint.sh` runs
-sshd under tini) — separate from the agent image, which holds no upstream credential.
+a frozen compatibility surface: renaming one would strand every already-provisioned repo. The gate runs as **its own container**, built and replaced by `portitor deploy` (see
+`spec/delivery/arch_deploy.md`), separate from the agent image, which holds no upstream credential.
+Its only mounts are the mirror volume (`/srv/git`) and the host-key volume; the config is image
+content at `/etc/portitor`. The embedded entrypoint, run as root under tini:
+
+1. refuses to boot when `/run/secrets/gh_token` is absent or empty, otherwise hands it and its
+   directory to `git` (`0400`, `0700`);
+2. sets `git`'s global `credential.https://github.com.helper` to the absolute
+   `/usr/local/bin/portitor git-credential` (network git calls are the non-hermetic ones and honor
+   it; the verdict calls mask global config);
+3. generates the ed25519 host key into the host-key volume only when it is absent;
+4. installs `AGENT_AUTHORIZED_KEY` with the forced command, as before;
+5. validates every repo config, as `git`;
+6. as `git` (`setpriv --reuid --regid --init-groups`, with `HOME`, `USER`, `LOGNAME` set),
+   provisions every `repos.d/<repo>.json` whose repo is not provisioned: `add-repo --ensure`,
+   which takes the config's default branch and, when `upstream_slug` is set,
+   `https://github.com/<slug>.git` (without it the repo is provisioned with no upstream, and it
+   logs that), and leaves a provisioned repo alone; a failure refuses to boot;
+7. execs sshd in the foreground.
+
+It never logs in to GitHub: portitor reads the token per call (see spec/action/arch_action.md), so
+boot contacts GitHub only to provision a missing mirror. `GH_TOKEN` in the container env is not
+read.
 
 Once a repo is provisioned, `portitor add-role` fills in its role map re-runnably — binding a signer
 fingerprint to a role (and optionally trusting a signing role's public key in `allowed_signers`)

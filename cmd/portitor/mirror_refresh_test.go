@@ -437,6 +437,10 @@ func TestShellCommand_RefreshOnlyOnUploadPack(t *testing.T) {
 	t.Setenv("PORTITOR_REPOS_DIR", reposDir)
 	writeMinimalRepoConfig(t, reposDir, "mirror", "main")
 	t.Setenv("PORTITOR_REPO_ROOT", root)
+	// shell serves only a provisioned repo.
+	if err := bakeHooks(mirror, filepath.Join(reposDir, "mirror.json")); err != nil {
+		t.Fatal(err)
+	}
 
 	binDir := t.TempDir()
 	for _, name := range []string{"git-receive-pack", "git-upload-pack"} {

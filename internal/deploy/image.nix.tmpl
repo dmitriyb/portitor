@@ -1,0 +1,108 @@
+{ tag }:
+let
+  pkgs = import (fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/{{.Rev}}.tar.gz";
+    sha256 = "{{.SHA256}}";
+  }) {
+    system = "{{.System}}";
+    overlays = [ {{if .Overlay}}(import ./overlay.nix){{end}} ];
+  };
+
+  gate = pkgs.runCommand "portitor-gate" { } ''
+    install -Dm755 ${./portitor-gate} $out/bin/portitor
+  '';
+
+  runtime = pkgs.buildEnv {
+    name = "portitor-gate-runtime";
+    ignoreCollisions = true;
+    pathsToLink = [ "/bin" ];
+    paths = [
+      pkgs.bashInteractive
+      pkgs.coreutils
+      pkgs.gawk
+      pkgs.openssh
+      pkgs.gitMinimal
+      pkgs.gh
+      pkgs.tini
+      pkgs.util-linux
+      gate
+{{- range .Packages}}
+      {{.}}
+{{- end}}
+    ];
+  };
+
+  passwd = pkgs.writeText "passwd" ''
+    root:x:0:0:root:/root:/bin/sh
+    git:x:1000:1000:git:/home/git:/bin/sh
+    sshd:x:74:74:sshd privsep:/var/empty:/sbin/nologin
+  '';
+  group = pkgs.writeText "group" ''
+    root:x:0:
+    git:x:1000:
+    sshd:x:74:
+    nogroup:x:65534:
+  '';
+  shadow = pkgs.writeText "shadow" ''
+    root:*:19700:0:99999:7:::
+    git:*:19700:0:99999:7:::
+    sshd:!:19700:0:99999:7:::
+  '';
+  sshdConfig = pkgs.writeText "sshd_config" ''
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication yes
+    PermitRootLogin no
+    UsePAM no
+    AuthorizedKeysFile /home/git/.ssh/authorized_keys
+    HostKey /var/lib/portitor/hostkey/ssh_host_ed25519_key
+    PidFile /run/sshd.pid
+  '';
+in
+pkgs.dockerTools.buildLayeredImage {
+  name = "portitor-gate/{{.Name}}";
+  inherit tag;
+  contents = [ runtime pkgs.dockerTools.binSh pkgs.dockerTools.usrBinEnv pkgs.cacert ];
+
+  extraCommands = ''
+    mkdir -p usr/local/bin usr/sbin sbin etc/ssh etc/ssl/certs run/sshd run/secrets var/empty \
+      var/lib/portitor/hostkey srv/git home/git root tmp
+
+    ln -s ${gate}/bin/portitor usr/local/bin/portitor
+    ln -s ${pkgs.openssh}/bin/sshd usr/sbin/sshd
+    ln -s ${pkgs.tini}/bin/tini usr/sbin/tini
+    ln -s ${pkgs.coreutils}/bin/false sbin/nologin
+    # OpenSSL's and Go's default trust-store lookups want ca-certificates.crt;
+    # cacert ships ca-bundle.crt in its own layer, so the link resolves at run time.
+    ln -s ca-bundle.crt etc/ssl/certs/ca-certificates.crt
+
+    cp ${./entrypoint.sh} usr/local/bin/portitor-entrypoint
+    chmod 0755 usr/local/bin/portitor-entrypoint
+
+    cp ${passwd} etc/passwd
+    cp ${group} etc/group
+    cp ${shadow} etc/shadow
+    cp ${sshdConfig} etc/ssh/sshd_config
+    chmod 0644 etc/passwd etc/group etc/ssh/sshd_config
+    chmod 0640 etc/shadow
+    chmod 1777 tmp
+
+    cp -R ${./config} etc/portitor
+    chmod -R u+w etc/portitor
+    find etc/portitor -type d -exec chmod 0755 {} +
+    find etc/portitor -type f -perm -u+x -exec chmod 0755 {} +
+    find etc/portitor -type f ! -perm -u+x -exec chmod 0644 {} +
+  '';
+
+  fakeRootCommands = ''
+    chown -R 1000:1000 home/git srv/git
+    chown 0:0 run/sshd var/empty run/secrets var/lib/portitor/hostkey
+    chmod 0755 run/sshd var/empty
+    chmod 0700 run/secrets var/lib/portitor/hostkey
+  '';
+
+  config = {
+    Entrypoint = [ "/usr/sbin/tini" "--" "/usr/local/bin/portitor-entrypoint" ];
+    Env = [ "PATH=/usr/local/bin:/usr/sbin:/bin" ];
+  };
+}

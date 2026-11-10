@@ -535,7 +535,7 @@ func prRun(fp string, args []string, o prOptions, in io.Reader, out, errw io.Wri
 		}
 		fmt.Fprint(out, res)
 	case "merge":
-		st, err := gh.FetchMergeState(prNum)
+		st, err := mergeState(gh, prNum, s.RequiredChecks)
 		if err != nil {
 			return fail(err)
 		}
@@ -601,6 +601,18 @@ func resolveGateThreads(gh action.GH, pr int) error {
 	return nil
 }
 
+// mergeState re-derives the PR's merge state, reading its head's checks only
+// when required_checks needs them, so a config with none never depends on the
+// CI read permissions at all.
+func mergeState(gh action.GH, pr int, requiredChecks []string) (action.MergeState, error) {
+	st, err := gh.FetchMergeState(pr)
+	if err != nil || len(requiredChecks) == 0 {
+		return st, err
+	}
+	st.Checks, err = gh.FetchHeadChecks(st.HeadSHA)
+	return st, err
+}
+
 // runMergeChecks runs each configured merge_gate.checks command as a merge
 // precondition, under check.RunPredicate's hermetic contract, in the repo's
 // bare dir, with the PR number and head SHA appended as the final two argv
@@ -660,6 +672,15 @@ func shellCommand(args []string) int {
 		// rest = [git-receive-pack|git-upload-pack, <repo-path>]
 		if !allowedRepoPath(rest[1]) {
 			fmt.Fprintln(os.Stderr, "portitor: repository not allowed")
+			return 1
+		}
+		// Only a fully provisioned repo is served: a repo left behind by a failed
+		// provisioning has no gate hooks and would accept every push.
+		if ok, reason, err := repoProvisioned(rest[1]); err != nil {
+			fmt.Fprintf(os.Stderr, "portitor: %v\n", err)
+			return 1
+		} else if !ok {
+			fmt.Fprintf(os.Stderr, "portitor: repository not provisioned (%s)\n", reason)
 			return 1
 		}
 		if rest[0] == "git-upload-pack" {
@@ -881,6 +902,13 @@ func deriveSlug(url string) string {
 // ---- init-repo ----
 
 func initRepoRun(bare, def, upstream, configPath string) int {
+	return provisionRepo(bare, def, upstream, configPath, false)
+}
+
+// provisionRepo is init-repo; with ensure, a target that is already
+// provisioned is success, decided under the provisioning lock so a racing
+// provisioning of the same repo cannot turn it into a failure.
+func provisionRepo(bare, def, upstream, configPath string, ensure bool) int {
 	if bare == "" {
 		fmt.Fprintln(os.Stderr, "init-repo: --bare is required")
 		return 2
@@ -898,46 +926,12 @@ func initRepoRun(bare, def, upstream, configPath string) int {
 		cfg = filepath.Join(config.ReposDir(), name+".json")
 	}
 
-	if err := git.Run("", "init", "--bare", "--initial-branch="+def, bare); err != nil {
-		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
-		return 1
-	}
-
-	if upstream != "" {
-		// Provisioning must fail loudly, not bake an unverified repo: a
-		// swallowed remote-add / seed error leaves a gate that cannot forward.
-		if err := git.Run(bare, "remote", "add", "upstream", upstream); err != nil {
-			fmt.Fprintf(os.Stderr, "init-repo: add upstream remote: %v\n", err)
-			return 1
-		}
-		if err := git.OutputNetworkRun(bare, "fetch", "upstream"); err != nil {
-			fmt.Fprintf(os.Stderr, "init-repo: fetch upstream: %v\n", err)
-			return 1
-		}
-		// Seed the default branch from upstream only if upstream has it (a fresh
-		// empty upstream legitimately does not).
-		hasDefault, err := refExists(bare, "refs/remotes/upstream/"+def)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "init-repo: check upstream default branch: %v\n", err)
-			return 1
-		}
-		if hasDefault {
-			if err := git.Run(bare, "update-ref", "refs/heads/"+def, "refs/remotes/upstream/"+def); err != nil {
-				fmt.Fprintf(os.Stderr, "init-repo: seed default branch: %v\n", err)
-				return 1
-			}
-		}
-	}
-
-	if err := bakeHooks(bare, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
-		return 1
-	}
-
 	// Never bake a KNOWN-BAD config silently: if the config is present, it must
 	// load and validate (else the gate would reject every later push with no
-	// cause surfaced here). An absent config is a loud warning, not an error —
-	// a bootstrap may place it next — but the gate will not work until it does.
+	// cause surfaced here) — checked before anything touches the disk. An absent
+	// config is a loud warning, not an error — a bootstrap may place it next —
+	// but the gate will not work until it does.
+	remote := "upstream"
 	if _, err := os.Stat(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "init-repo: warning: config %s is not present yet — place it (add-role/add-repo) before pushing; the gate will reject until then\n", cfg)
 	} else if s, err := config.LoadFile(cfg); err != nil {
@@ -949,10 +943,93 @@ func initRepoRun(bare, def, upstream, configPath string) int {
 			fmt.Fprintf(os.Stderr, "  - %s\n", p)
 		}
 		return 1
+	} else {
+		remote = upstreamRemote(s)
+	}
+
+	release, err := acquireProvisionLock(bare)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
+		return 1
+	}
+	defer release()
+
+	// An existing target is never overwritten: a provisioned one needs no
+	// init-repo (upgrade-repo re-bakes its shims), and an unprovisioned one may
+	// still hold accepted, unforwarded branches.
+	if _, err := os.Lstat(bare); err == nil {
+		if ok, reason, err := repoProvisioned(bare); err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: %s: %v\n", bare, err)
+		} else if ok && ensure {
+			fmt.Printf("portitor: %s is already provisioned\n", bare)
+			return 0
+		} else if ok {
+			fmt.Fprintf(os.Stderr, "init-repo: %s is already provisioned (use upgrade-repo to re-bake its hooks)\n", bare)
+		} else {
+			fmt.Fprintf(os.Stderr, "init-repo: %s exists but is not provisioned (%s); refusing to overwrite it — inspect it, then move it aside\n", bare, reason)
+		}
+		return 1
+	}
+
+	// Provisioning is atomic: the repo is built at a path the gate never serves
+	// and renamed into place only once it is complete, so a failure at any step
+	// can never leave a hookless repo that accepts every push.
+	tmp := provisioningPath(bare)
+	if err := os.RemoveAll(tmp); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: remove leftover %s: %v\n", tmp, err)
+		return 1
+	}
+	if code := buildRepo(tmp, def, upstream, remote, cfg); code != 0 {
+		_ = os.RemoveAll(tmp)
+		return code
+	}
+	if err := os.Rename(tmp, bare); err != nil {
+		_ = os.RemoveAll(tmp)
+		fmt.Fprintf(os.Stderr, "init-repo: move %s into place: %v\n", bare, err)
+		return 1
 	}
 
 	fmt.Printf("portitor: initialized bare repo %s (default=%s, config=%s%s)\n",
 		bare, def, cfg, upstreamNote(upstream))
+	return 0
+}
+
+// buildRepo creates the complete gated repo at dir: bare repo, upstream remote
+// fetched and default branch seeded (when upstream is set), hook shims baked.
+func buildRepo(dir, def, upstream, remote, cfg string) int {
+	if err := git.Run("", "init", "--bare", "--initial-branch="+def, dir); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
+		return 1
+	}
+	if upstream != "" {
+		// Provisioning must fail loudly, not bake an unverified repo: a
+		// swallowed remote-add / seed error leaves a gate that cannot forward.
+		if err := git.Run(dir, "remote", "add", remote, upstream); err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: add %s remote: %v\n", remote, err)
+			return 1
+		}
+		if err := git.OutputNetworkRun(dir, "fetch", remote); err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: fetch %s: %v\n", remote, err)
+			return 1
+		}
+		// Seed the default branch from upstream only if upstream has it (a fresh
+		// empty upstream legitimately does not).
+		hasDefault, err := refExists(dir, "refs/remotes/"+remote+"/"+def)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "init-repo: check upstream default branch: %v\n", err)
+			return 1
+		}
+		if hasDefault {
+			if err := git.Run(dir, "update-ref", "refs/heads/"+def, "refs/remotes/"+remote+"/"+def); err != nil {
+				fmt.Fprintf(os.Stderr, "init-repo: seed default branch: %v\n", err)
+				return 1
+			}
+		}
+	}
+	if err := bakeHooks(dir, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "init-repo: %v\n", err)
+		return 1
+	}
 	return 0
 }
 
@@ -974,7 +1051,7 @@ func bakeHooks(bare, cfg string) error {
 	}
 	for _, hook := range []string{"pre-receive", "post-receive"} {
 		// PORTITOR_BIN lets the container image point the shim at an absolute
-		// binary path (deploy/entrypoint.sh); it is env-controlled but safe —
+		// binary path; it is env-controlled but safe —
 		// sshd does not forward client env by default (no AcceptEnv), so a
 		// pushing agent cannot set it.
 		shim := fmt.Sprintf("#!/bin/sh\n%s%d\nexport PORTITOR_CONFIG=%s\nexec \"${PORTITOR_BIN:-portitor}\" %s\n",
@@ -1014,7 +1091,7 @@ func upgradeRepoRun(repo, bareFlag string) int {
 // addRepoRun provisions a managed repo using the registry conventions: bare at
 // <repos-root>/<name>.git and per-repo config at <repos-dir>/<name>.json (placed
 // there first). It is init-repo with the paths derived from the repo name.
-func addRepoRun(name, def, upstream string) int {
+func addRepoRun(name, def, upstream string, ensure bool) int {
 	if name == "" {
 		fmt.Fprintln(os.Stderr, "add-repo: --repo is required")
 		return 2
@@ -1025,7 +1102,30 @@ func addRepoRun(name, def, upstream string) int {
 		return 1
 	}
 	bare := filepath.Join(config.ReposRoot(), name+".git")
-	return initRepoRun(bare, def, upstream, cfg)
+	if ensure {
+		// The gate's boot provisions from the config alone: no flags to drift
+		// from it, and a provisioned repo is left as it is.
+		s, err := config.LoadFile(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "add-repo: config %s: %v\n", cfg, err)
+			return 1
+		}
+		def, upstream = s.DefaultBranch, ""
+		if s.UpstreamSlug != "" {
+			if !validSlug(s.UpstreamSlug) {
+				fmt.Fprintf(os.Stderr, "add-repo: config %s: upstream_slug %q is not owner/name\n", cfg, s.UpstreamSlug)
+				return 1
+			}
+			upstream = "https://github.com/" + s.UpstreamSlug + ".git"
+		} else {
+			fmt.Fprintf(os.Stderr, "add-repo: %s names no upstream_slug; %s has no upstream\n", cfg, bare)
+		}
+		if def == "" {
+			fmt.Fprintf(os.Stderr, "add-repo: config %s has no default_branch\n", cfg)
+			return 1
+		}
+	}
+	return provisionRepo(bare, def, upstream, cfg, ensure)
 }
 
 func upstreamNote(u string) string {

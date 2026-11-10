@@ -114,7 +114,7 @@ Behavior when `--pub` is given:
   system depends on. The operator must not pass `--pub` for these roles.
 
 When `--pub` is **omitted**, `allowed_signers` is left untouched (the operator manages it out of band,
-e.g. via `deploy/DEPLOY.md`). Note the fingerprint→role binding alone suffices for role *attribution*;
+e.g. by hand in the config dir). Note the fingerprint→role binding alone suffices for role *attribution*;
 but a signing role whose key is not yet in `allowed_signers` will have its commits rejected as
 untrusted until the key is added there.
 

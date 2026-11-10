@@ -121,8 +121,19 @@ build_release() {
   tar -czf "$_dldir/$_arc" -C "$_stage" portitor
   ssh-keygen -Y sign -f "$SIGNER_KEY" -n file "$_dldir/$_arc" >/dev/null 2>&1 \
     || { echo "harness: signing $_arc failed" >&2; exit 1; }
+  # A non-linux host also fetches the linux archive for portitor-gate.
+  _garc="portitor_${_ver}_linux_${GOARCH}.tar.gz"
+  if [ "$GOOS" != linux ]; then
+    rm -f "$_dldir/$_garc" "$_dldir/$_garc.sig"
+    tar -czf "$_dldir/$_garc" -C "$_stage" portitor
+    ssh-keygen -Y sign -f "$SIGNER_KEY" -n file "$_dldir/$_garc" >/dev/null 2>&1 \
+      || { echo "harness: signing $_garc failed" >&2; exit 1; }
+  fi
   if [ "$_mode" = tamper ]; then
     printf 'tampered' >> "$_dldir/$_arc"
+  fi
+  if [ "$_mode" = tamper-gate ]; then
+    printf 'tampered' >> "$_dldir/$_garc"
   fi
   mkdir -p "$ORIGIN/repos/$OWNER/$REPO/releases"
   printf '{"tag_name":"%s"}\n' "$_tag" > "$ORIGIN/repos/$OWNER/$REPO/releases/latest"
@@ -226,7 +237,8 @@ build_release 0.1.2
 TGT="$WORK/s5/portitor"
 mkdir -p "$WORK/s5"
 make_fake_binary "$TGT" 0.1.2
-run_script --upgrade --target "$TGT"
+make_fake_binary "$WORK/s5/portitor-gate" 0.1.2   # a current pair, so the no-op is real
+run_script --upgrade --target "$TGT" --gate-current 0.1.2
 check "S5 equal version (latest path) exits 0" 0 "$RC"
 check "S5 target unchanged (0.1.2)" 0.1.2 "$(tgt_version "$TGT")"
 if [ -e "${TGT}.bak" ]; then no "S5 no backup on a no-op"; else ok "S5 no backup on a no-op"; fi
@@ -237,7 +249,8 @@ case "$OUT" in *"$S5_NOTICE"*) ok "S5 prints the explicit nothing-changed notice
 TGT="$WORK/s5b/portitor"
 mkdir -p "$WORK/s5b"
 make_fake_binary "$TGT" 0.1.2
-run_script --upgrade --target "$TGT" --version v0.1.2
+make_fake_binary "$WORK/s5b/portitor-gate" 0.1.2
+run_script --upgrade --target "$TGT" --version v0.1.2 --gate-current 0.1.2
 check "S5 equal --version exits 0" 0 "$RC"
 check "S5 --version target unchanged (0.1.2)" 0.1.2 "$(tgt_version "$TGT")"
 if [ -e "${TGT}.bak" ]; then no "S5 --version no backup on a no-op"; else ok "S5 --version no backup on a no-op"; fi
@@ -357,6 +370,109 @@ check "S12 --check on older latest still exits 0" 0 "$RC"
 check "S12 --check changes nothing (still 0.1.5)" 0.1.5 "$(tgt_version "$TGT")"
 if [ -e "${TGT}.bak" ]; then no "S12 --check writes no backup"; else ok "S12 --check writes no backup"; fi
 case "$OUT" in *"anomalous"*) ok "S12 --check flags the anomaly as a warning" ;; *) no "S12 --check flags the anomaly as a warning" ;; esac
+
+# ---------------------------------------------------------------------------
+# P1: an upgrade replaces the portitor/portitor-gate pair as one unit.
+# ---------------------------------------------------------------------------
+build_release 0.1.2
+TGT="$WORK/p1/portitor"
+GTGT="$WORK/p1/portitor-gate"
+mkdir -p "$WORK/p1"
+make_fake_binary "$TGT" 0.1.0
+make_fake_binary "$GTGT" 0.1.0
+run_script --upgrade --target "$TGT"
+check "P1 upgrade exits 0" 0 "$RC"
+check "P1 portitor is 0.1.2" 0.1.2 "$(tgt_version "$TGT")"
+check "P1 portitor-gate is 0.1.2" 0.1.2 "$(tgt_version "$GTGT")"
+check "P1 portitor-gate backup holds 0.1.0" 0.1.0 "$(tgt_version "${GTGT}.bak")"
+
+# ---------------------------------------------------------------------------
+# P2: rollback restores both files.
+# ---------------------------------------------------------------------------
+run_script --upgrade --target "$TGT" --rollback
+check "P2 rollback exits 0" 0 "$RC"
+check "P2 portitor restored to 0.1.0" 0.1.0 "$(tgt_version "$TGT")"
+check "P2 portitor-gate restored to 0.1.0" 0.1.0 "$(tgt_version "$GTGT")"
+
+# ---------------------------------------------------------------------------
+# P3: a current portitor with a missing or older portitor-gate is repaired.
+# ---------------------------------------------------------------------------
+build_release 0.1.2
+TGT="$WORK/p3/portitor"
+mkdir -p "$WORK/p3"
+make_fake_binary "$TGT" 0.1.2
+run_script --upgrade --target "$TGT"
+check "P3 repair of a missing gate exits 0" 0 "$RC"
+check "P3 missing portitor-gate installed at 0.1.2" 0.1.2 "$(tgt_version "$WORK/p3/portitor-gate")"
+make_fake_binary "$WORK/p3/portitor-gate" 0.1.0
+run_script --upgrade --target "$TGT" --gate-current 0.1.0
+check "P3 repair of an older gate exits 0" 0 "$RC"
+check "P3 older portitor-gate repaired to 0.1.2" 0.1.2 "$(tgt_version "$WORK/p3/portitor-gate")"
+run_script --upgrade --target "$TGT" --gate-current 0.1.2
+check "P3 a current pair is a no-op" 0 "$RC"
+case "$OUT" in *"nothing changed"*) ok "P3 a current pair reports nothing changed" ;; *) no "P3 a current pair reports nothing changed" ;; esac
+
+# ---------------------------------------------------------------------------
+# P4: --gate-target names the gate's path.
+# ---------------------------------------------------------------------------
+build_release 0.1.2
+TGT="$WORK/p4/bin/portitor"
+GTGT="$WORK/p4/elsewhere/portitor-gate"
+mkdir -p "$WORK/p4/bin" "$WORK/p4/elsewhere"
+make_fake_binary "$TGT" 0.1.0
+run_script --upgrade --target "$TGT" --gate-target "$GTGT"
+check "P4 upgrade with --gate-target exits 0" 0 "$RC"
+check "P4 portitor-gate installed at --gate-target" 0.1.2 "$(tgt_version "$GTGT")"
+if [ -e "$WORK/p4/bin/portitor-gate" ]; then no "P4 nothing installed beside --target"; else ok "P4 nothing installed beside --target"; fi
+
+# ---------------------------------------------------------------------------
+# P5: first-install puts portitor-gate beside portitor.
+# ---------------------------------------------------------------------------
+build_release 0.1.2
+INSTALL_DIR="$WORK/p5/bin"
+mkdir -p "$INSTALL_DIR"
+OUT=$(PORTITOR_API_BASE="file://$ORIGIN" PORTITOR_DL_BASE="file://$ORIGIN" \
+  INSTALL_DIR="$INSTALL_DIR" sh "$TESTSH" 2>&1) && RC=0 || RC=$?
+check "P5 first-install exits 0" 0 "$RC"
+check "P5 portitor-gate installed at 0.1.2" 0.1.2 "$(tgt_version "$INSTALL_DIR/portitor-gate")"
+
+# ---------------------------------------------------------------------------
+# P6: a tampered artifact leaves both files untouched (the gate's own archive
+# exists only on a non-linux host; on linux both come from the one archive).
+# ---------------------------------------------------------------------------
+if [ "$GOOS" = linux ]; then build_release 0.1.4 tamper; else build_release 0.1.4 tamper-gate; fi
+TGT="$WORK/p6/portitor"
+GTGT="$WORK/p6/portitor-gate"
+mkdir -p "$WORK/p6"
+make_fake_binary "$TGT" 0.1.0
+make_fake_binary "$GTGT" 0.1.0
+run_script --upgrade --target "$TGT"
+if [ "$RC" -ne 0 ]; then ok "P6 tampered release refused"; else no "P6 tampered release refused (got 0)"; fi
+check "P6 portitor untouched" 0.1.0 "$(tgt_version "$TGT")"
+check "P6 portitor-gate untouched" 0.1.0 "$(tgt_version "$GTGT")"
+
+# ---------------------------------------------------------------------------
+# P7: a gate that cannot be rolled back leaves the tool alone (pair unsplit).
+# Skipped under root, where a read-only directory is still writable.
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" -eq 0 ]; then
+  echo "ok   - P7 split-rollback guard skipped (euid 0)"
+  PASS=$((PASS + 1))
+else
+  build_release 0.1.2
+  TGT="$WORK/p7/bin/portitor"
+  GDIR="$WORK/p7/gate"
+  mkdir -p "$WORK/p7/bin" "$GDIR"
+  make_fake_binary "$TGT" 0.1.0
+  make_fake_binary "$GDIR/portitor-gate" 0.1.0
+  run_script --upgrade --target "$TGT" --gate-target "$GDIR/portitor-gate"
+  check "P7 setup upgrade exits 0" 0 "$RC"
+  chmod 0500 "$GDIR"
+  run_script --upgrade --target "$TGT" --gate-target "$GDIR/portitor-gate" --rollback
+  chmod 0700 "$GDIR"
+  if [ "$RC" -ne 0 ]; then ok "P7 failed gate rollback exits non-zero"; else no "P7 failed gate rollback exits non-zero (got 0)"; fi
+  check "P7 tool left at 0.1.2" 0.1.2 "$(tgt_version "$TGT")"
+fi
 
 echo "# ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ]

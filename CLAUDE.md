@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 portitor is a self-hosted git gateway between an untrusted agent and an upstream forge. A `pre-receive` hook verifies the result of a push (signed by a trusted key, branch namespace only, never the default branch, role-gated content rules); a `post-receive` hook forwards accepted branches upstream with portitor's own credential and opens the PR; `portitor pr` is a role-gated action API; `portitor-mcp` mediates MCP tool calls over the same SSH channel.
 
-portitor is **mechanism, not policy**: identity is a signer-key fingerprint mapped to a role by config, and every domain name (roles, protected paths, record fields, the record-extraction command) arrives as configuration. Its only runtime dependency is git.
+portitor is **mechanism, not policy**: identity is a signer-key fingerprint mapped to a role by config, and every domain name (roles, protected paths, record fields, the record-extraction command) arrives as configuration. The gate's only runtime dependency is git; `portitor deploy` alone also drives `docker` and `nix` on the operator's host.
 
 ## Module Hierarchy
 
@@ -16,7 +16,7 @@ portitor is **mechanism, not policy**: identity is a signer-key fingerprint mapp
 | gate | Push verification in `pre-receive`: signature and role checks, content rules, forwarding, reconcile, config loading, audit | cli |
 | action | GitHub mediation: auto-PR on forward, the `portitor shell` dispatcher, the role-gated `pr` action API with re-derived merge preconditions | cli, gate |
 | mcp | `portitor-mcp`: shape-validated MCP forwarding, pinned tool allowlist, per-role tool access, upstream credentials held only by the mediator | cli, action |
-| delivery | Release pipeline: signed binaries from a tag, `install.sh`, `portitor upgrade`; the container image is a local build | cli |
+| delivery | Release pipeline: signed binaries from a tag, `install.sh` and `portitor upgrade` for the `portitor`/`portitor-gate` pair; `portitor deploy`, which builds the gate image with Nix and runs it | cli, gate |
 
 Go packages live under `internal/` (`gate`, `rules`, `check`, `config`, `git`, `action`, `audit`, `mcpconfig`, `mcpschema`, `mcpwire`) with the two binaries in `cmd/portitor` and `cmd/portitor-mcp`.
 

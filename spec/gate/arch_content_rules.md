@@ -261,6 +261,10 @@ repo-wide explicit-argv discipline:
 - an address-space rlimit (512 MiB) applied via a re-exec trampoline (`portitor
   internal-check-exec` sets `RLIMIT_AS` on itself, then `exec`s the configured command —
   child-only, portitor's own limits untouched), with a minimal environment (PATH, HOME);
+  a `merge_gate.checks` predicate (the same trampoline, run by `pr merge`) also gets `GH_TOKEN`
+  from the gate's credential file when it exists, the access it had through the former stored
+  `gh` login; a content check never gets it, because it runs over pushed content and its stderr
+  excerpt returns to the pusher;
 - input bounded first (`git cat-file -s`, cap 20 MiB per side) and stdout bounded by a hard cap
   (64 MiB) that errors when exceeded;
 - a private throwaway working directory per invocation, removed afterwards.

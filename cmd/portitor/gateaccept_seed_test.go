@@ -3,15 +3,16 @@
 package main
 
 // Seed/reset for the disposable GitHub repo the gate acceptance suite drives
-// (testdata/realgh.local.json), plus the scenario 3 per-repo config builder.
-// The repo starts genuinely empty (spec/proposals/2026-08-05-
-// gate-acceptance-suite.md): ensureSeed creates its pristine state once (an
-// initial commit + the `gateaccept-seed` tag); resetDisposableRepo restores
-// that state before every scenario (closes open PRs, deletes non-default
-// branches, force-pushes the default branch back to the tag) — the
-// faber-e2e reset shape (shared/.local/bin/faber-e2e), reimplemented here in
-// Go and scoped to the forge side only (no gate mirror persists across
-// acceptance tests — each scenario stands up its own fresh container).
+// (PORTITOR_ACCEPT_REPO), plus the scenario 3 per-repo config builder.
+// The repo's pristine state is prepared once by the operator from
+// testdata/acceptance-seed (scripts/prepare-acceptance-seed.sh) and tagged
+// with testdata/acceptance-seed.tag: it carries a workflow file, which the
+// suite's own PAT is deliberately unable to push. verifySeed proves the tag
+// still holds exactly that tree; resetDisposableRepo restores that state
+// before every scenario (closes open PRs, deletes non-default
+// branches, force-pushes the default branch back to the tag), scoped to the
+// forge side only (no gate mirror persists across acceptance tests — each
+// scenario stands up its own fresh gate).
 
 import (
 	"bytes"
@@ -33,52 +34,56 @@ import (
 )
 
 const (
-	seedTag   = "gateaccept-seed"
-	probeFile = "gateaccept-probe.txt"
-	beadsFile = ".beads/issues.jsonl"
-	beadID    = "gateaccept-bh-1"
+	probeFile     = "gateaccept-probe.txt"
+	approvalsFile = "approvals.jsonl"
+	approvalID    = "gateaccept-change-1"
+	seedDir       = "testdata/acceptance-seed"
 
-	structRuleBeadsReviewerOnly = "beads-file-reviewer-only"
-	semanticRuleBeadClose       = "bead-close-reviewer-only"
-	mergeCheckBeadClosed        = "bead-closed"
+	structRuleApprovalsReviewerOnly = "approvals-file-reviewer-only"
+	semanticRuleApprove             = "approve-reviewer-only"
+	mergeCheckApproved              = "approved"
 )
 
-// jsonlWrapScript is the content_rules semantic check command for
-// .beads/issues.jsonl: the file is one JSON object per line (beads' own
-// jsonl shape); this wraps stdin's lines into the {"issues":[...]} array
-// check.Records expects at records_path "issues" — a tiny stand-in for a
-// real record-extractor tool (like the `br` CLI DEPLOY.md's worked example
-// uses), written directly against alpine's busybox awk/sh so the suite needs
-// nothing beyond what the shipped Dockerfile already installs. Verified by
-// hand against both BSD awk (macOS) and busybox awk (the gate image) to
-// produce valid JSON, including on a single-line/no-trailing-comma input.
-const jsonlWrapScript = `awk 'BEGIN{printf "{\"issues\":["} {if(NR>1)printf ","; printf "%s", $0} END{printf "]}"}'`
+// seedTag is the tag the operator put on the prepared seed.
+var seedTag = func() string {
+	b, err := os.ReadFile("testdata/acceptance-seed.tag")
+	if err != nil {
+		panic(err) // the fixture is part of the tree; its absence is a broken checkout
+	}
+	return strings.TrimSpace(string(b))
+}()
 
-// beadClosedScript is the merge_gate.checks "bead-closed" predicate: exit 0
-// (met) iff the given head (RunPredicate's extraArgs put it at $2, after the
-// command's own leading "bead-closed" arg at $0) has a closed bead recorded
-// in .beads/issues.jsonl; exit 1 (unmet, incl. when the file/ref is absent —
-// fail-closed) otherwise. Runs with cwd = the bare repo dir (RunPredicate's
-// workdir contract), where a bare-aware `git show` needs no --git-dir.
-const beadClosedScript = `git show "$2":.beads/issues.jsonl 2>/dev/null | grep -q '"status":"closed"'`
+// jsonlWrapScript is the content_rules semantic check command for the
+// approvals file (one JSON object per line): it wraps stdin's lines into the
+// {"records":[...]} array check.Records expects at records_path "records" — a
+// stand-in for a real record-extractor tool, written against plain POSIX awk/sh
+// so it needs nothing beyond the gate image's fixed part (gawk).
+const jsonlWrapScript = `awk 'BEGIN{printf "{\"records\":["} {if(NR>1)printf ","; printf "%s", $0} END{printf "]}"}'`
 
-// beadRecord is the one line of the seeded .beads/issues.jsonl fixture.
-type beadRecord struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Title  string `json:"title"`
+// approvedScript is the merge_gate.checks "approved" predicate: exit 0 (met)
+// iff the given head (RunPredicate's extraArgs put it at $2, after the
+// command's own leading arg at $0) records the change as approved; exit 1
+// otherwise, including when the file or ref is absent. It needs grep, which is
+// not in the gate image's fixed part: the scenario declares it as an image
+// package, the way an operator declares the tools their policy calls.
+const approvedScript = `git show "$2":` + approvalsFile + ` 2>/dev/null | grep -q '"state":"approved"'`
+
+// approvalRecord is the one line of the seeded approvals fixture.
+type approvalRecord struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
 }
 
-func seedBeadJSONL(status string) string {
-	b, err := json.Marshal(beadRecord{ID: beadID, Status: status, Title: "gateaccept probe bead"})
+func seedApprovalJSONL(state string) string {
+	b, err := json.Marshal(approvalRecord{ID: approvalID, State: state})
 	if err != nil {
-		panic(err) // beadRecord is a fixed, always-marshalable shape
+		panic(err) // approvalRecord is a fixed, always-marshalable shape
 	}
 	return string(b) + "\n"
 }
 
-// ---- gh api helpers (JSON-parsing; distinct from realgh_test.go's rawGH,
-// which merges stdout+stderr and is fine for non-parsed calls) ----
+// ---- gh api helpers (JSON-parsing; distinct from rawGH, which merges
+// stdout+stderr and is fine for non-parsed calls) ----
 
 // ghAPI runs `gh <args...>`, capturing stdout/stderr separately, and fails
 // the test loudly on error — for calls whose JSON stdout this file parses.
@@ -91,8 +96,8 @@ func ghAPI(t *testing.T, args ...string) []byte {
 	return out
 }
 
-// ghAPIOK is ghAPI without the test-fatal: for existence probes (the seed
-// tag may legitimately not exist yet) and best-effort cleanup calls.
+// ghAPIOK is ghAPI without the test-fatal: for existence probes whose failure
+// the caller reports itself, and best-effort cleanup calls.
 func ghAPIOK(args ...string) ([]byte, error) {
 	cmd := exec.Command("gh", args...)
 	cmd.Env = os.Environ()
@@ -111,48 +116,65 @@ func ghAPIOK(args ...string) ([]byte, error) {
 // gate correctly refuses a non-CLEAN state, so a merge issued in that window
 // fails spuriously. Polling this same field (not REST .mergeable, which can
 // settle independently — GraphQL mergeStateStatus was still UNKNOWN after REST
-// .mergeable had gone non-null) is what avoids racing that compute. A
-// production merge after a review has natural delay; this tight test does not.
-func waitMergeClean(t *testing.T, repo string, pr int) {
+// .mergeable had gone non-null) is what avoids racing that compute. It waits
+// for CLEAN of head specifically: right after a push GitHub can still report
+// the previous head's CLEAN, and a merge issued then meets the new head's
+// UNKNOWN. A production merge after a review has natural delay; this tight
+// test does not.
+func waitMergeClean(t *testing.T, repo string, pr int, head string) {
 	t.Helper()
 	deadline := time.Now().Add(45 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := ghAPIOK("pr", "view", strconv.Itoa(pr), "--repo", repo, "--json", "mergeStateStatus", "--jq", ".mergeStateStatus")
+		out, err := ghAPIOK("pr", "view", strconv.Itoa(pr), "--repo", repo, "--json", "mergeStateStatus,headRefOid",
+			"--jq", `.headRefOid + " " + .mergeStateStatus`)
 		last = strings.TrimSpace(string(out))
-		if err == nil && last == "CLEAN" {
+		if err == nil && last == head+" CLEAN" {
 			return
 		}
 		time.Sleep(1 * time.Second)
 	}
-	t.Fatalf("PR #%d mergeStateStatus never reached CLEAN within 45s (last: %q)", pr, last)
+	t.Fatalf("PR #%d never reached CLEAN at head %s within 45s (last: %q)", pr, head, last)
 }
 
-// ensureSeed makes the disposable repo's `gateaccept-seed` tag exist,
-// creating it (one commit carrying the trivial tracked file + the one-bead
-// .beads/issues.jsonl fixture, then the tag) the first time this suite ever
-// runs against the repo. Idempotent — a later run finds the tag and returns.
-func ensureSeed(t *testing.T, env realGHEnv) {
+// verifySeed fails unless the disposable repo's seed tag exists and its tree is
+// exactly testdata/acceptance-seed, path for path and byte for byte — a stale
+// or hand-edited seed would otherwise make every scenario test the wrong
+// starting state.
+func verifySeed(t *testing.T, env realGHEnv) {
 	t.Helper()
-	if _, err := ghAPIOK("api", fmt.Sprintf("repos/%s/git/ref/tags/%s", env.GH.Repo, seedTag)); err == nil {
-		return // already seeded
+	fix := "prepare it: clone the disposable repo, run scripts/prepare-acceptance-seed.sh <clone>, then push main and " + seedTag + " as it prints"
+	if _, err := ghAPIOK("api", fmt.Sprintf("repos/%s/git/ref/tags/%s", env.GH.Repo, seedTag)); err != nil {
+		t.Fatalf("the disposable repo %s has no seed tag %s: %v\n%s", env.GH.Repo, seedTag, err, fix)
 	}
-	dir := cloneRepo(t, env) // realgh_test.go: PAT-authenticated clone, signing disabled
-	runGit(t, dir, "checkout", "-B", "main")
-	if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(beadsFile)), 0o755); err != nil {
-		t.Fatal(err)
+	want := map[string][]byte{}
+	err := filepath.WalkDir(seedDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(seedDir, p)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		want[filepath.ToSlash(rel)] = b
+		return err
+	})
+	if err != nil {
+		t.Fatalf("read %s: %v", seedDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, beadsFile), []byte(seedBeadJSONL("open")), 0o644); err != nil {
-		t.Fatal(err)
+	dir := cloneRepo(t, env)
+	runGit(t, dir, "fetch", "-q", "origin", "tag", seedTag)
+	got := strings.Split(strings.TrimSuffix(runGit(t, dir, "ls-tree", "-r", "-z", "--name-only", seedTag), "\x00"), "\x00")
+	if len(got) != len(want) {
+		t.Fatalf("seed tag %s holds %v, want exactly the files of %s\n%s", seedTag, got, seedDir, fix)
 	}
-	if err := os.WriteFile(filepath.Join(dir, probeFile), []byte("gateaccept seed\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, path := range got {
+		w, ok := want[path]
+		if !ok || runGit(t, dir, "show", seedTag+":"+path) != string(w) {
+			t.Fatalf("seed tag %s: %s differs from %s\n%s", seedTag, path, seedDir, fix)
+		}
 	}
-	runGit(t, dir, "add", "-A")
-	runGit(t, dir, "commit", "-q", "-m", "gateaccept: seed")
-	runGit(t, dir, "push", "-q", "-u", "origin", "main")
-	runGit(t, dir, "tag", seedTag)
-	runGit(t, dir, "push", "-q", "origin", seedTag)
 }
 
 type ghPR struct {
@@ -177,12 +199,12 @@ type ghTagObject struct {
 }
 
 // resetDisposableRepo restores the forge side of the disposable repo to its
-// pristine seed state before every scenario (the faber-e2e reset shape):
-// seed if needed, close every open PR, delete every non-default branch, then
-// force the default branch back to the seed tag's commit.
+// pristine seed state before every scenario: verify the seed, close every open
+// PR, delete every non-default branch, then force the default branch back to
+// the seed tag's commit.
 func resetDisposableRepo(t *testing.T, env realGHEnv) {
 	t.Helper()
-	ensureSeed(t, env)
+	verifySeed(t, env)
 
 	var prs []ghPR
 	if err := json.Unmarshal(ghAPI(t, "api", fmt.Sprintf("repos/%s/pulls?state=open&per_page=100", env.GH.Repo)), &prs); err != nil {
@@ -240,8 +262,8 @@ func resetDisposableRepo(t *testing.T, env realGHEnv) {
 
 // scenario3Settings builds the single-account merge model config (spec/
 // proposals/2026-08-05-transparent-approve.md "single account (git
-// content)"): merge_gate.review "none" + a bead-closed checks predicate,
-// content_rules gating a bead-close (status -> closed) to the reviewer role,
+// content)"): merge_gate.review "none" + an "approved" checks predicate,
+// content_rules gating the approval (state -> approved) to the reviewer role,
 // and the merger role landing-only (identity_only_roles) — it signs nothing,
 // it only merges/closes.
 func scenario3Settings(roles map[string]roleKey, upstreamSlug, allowedSignersPath string) config.Settings {
@@ -259,8 +281,8 @@ func scenario3Settings(roles map[string]roleKey, upstreamSlug, allowedSignersPat
 				Version: rules.SupportedVersion,
 				Structural: &rules.StructuralRules{
 					Rules: []rules.StructuralRule{{
-						Name:       structRuleBeadsReviewerOnly,
-						Paths:      []string{".beads/**"},
+						Name:       structRuleApprovalsReviewerOnly,
+						Paths:      []string{approvalsFile},
 						Operations: []string{"delete", "rename"},
 						Roles:      &rules.RolePredicate{NotIn: []string{"reviewer"}},
 						Effect:     "deny",
@@ -268,15 +290,15 @@ func scenario3Settings(roles map[string]roleKey, upstreamSlug, allowedSignersPat
 				},
 				Semantic: &rules.SemanticRules{
 					Files: []rules.SemanticFile{{
-						Path: beadsFile,
+						Path: approvalsFile,
 						Check: rules.CheckDef{
 							Command:     []string{"/bin/sh", "-c", jsonlWrapScript},
-							RecordsPath: "issues",
+							RecordsPath: "records",
 							IDField:     "id",
 						},
 						Rules: []rules.SemanticRule{{
-							Name:   semanticRuleBeadClose,
-							Match:  rules.Matcher{Type: "field", Field: "status", HasTo: true, To: "closed"},
+							Name:   semanticRuleApprove,
+							Match:  rules.Matcher{Type: "field", Field: "state", HasTo: true, To: "approved"},
 							Roles:  &rules.RolePredicate{NotIn: []string{"reviewer"}},
 							Effect: "deny",
 						}},
@@ -297,8 +319,8 @@ func scenario3Settings(roles map[string]roleKey, upstreamSlug, allowedSignersPat
 		MergeGate: &action.MergeGateConfig{
 			Review: "none",
 			Checks: []action.CheckPredicate{{
-				Name:    mergeCheckBeadClosed,
-				Command: []string{"/bin/sh", "-c", beadClosedScript, mergeCheckBeadClosed},
+				Name:    mergeCheckApproved,
+				Command: []string{"/bin/sh", "-c", approvedScript, mergeCheckApproved},
 			}},
 		},
 		IdentityOnlyRoles: []string{"merger"},
@@ -319,15 +341,15 @@ func writeJSON(t *testing.T, path string, v any) {
 	}
 }
 
-// closeBead rewrites the beads fixture to "closed" and commits it in dir
-// (whose git identity/signing key the caller has already configured via
+// approveChange rewrites the approvals fixture to "approved" and commits it in
+// dir (whose git identity/signing key the caller has already configured via
 // gitConfigSigning) — the git-content approval act the single-account world
 // (2026-08-05-transparent-approve) uses in place of a native approve.
-func closeBead(t *testing.T, dir string) {
+func approveChange(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, beadsFile), []byte(seedBeadJSONL("closed")), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, approvalsFile), []byte(seedApprovalJSONL("approved")), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mustRun(t, "git", "-C", dir, "add", "-A")
-	mustRun(t, "git", "-C", dir, "commit", "-q", "-S", "-m", "gateaccept: close bead "+beadID)
+	mustRun(t, "git", "-C", dir, "commit", "-q", "-S", "-m", "gateaccept: approve "+approvalID)
 }

@@ -68,7 +68,9 @@ func newRootCommand() *cobra.Command {
 		newAddRoleCmd(),
 		newValidateConfigCmd(),
 		newUpgradeCmd(),
+		newDeployCmd(),
 		newShellCmd(),
+		newGitCredentialCmd(),
 		newPrCmd(func() string { return os.Getenv("PORTITOR_FINGERPRINT") }),
 		newVersionCmd(),
 		newInternalCheckExecCmd(),
@@ -128,18 +130,23 @@ func newInitRepoCmd() *cobra.Command {
 
 func newAddRepoCmd() *cobra.Command {
 	var name, def, upstream string
+	var ensure bool
 	cmd := &cobra.Command{
 		Use:     "add-repo",
 		Short:   "init-repo via the registry conventions",
 		GroupID: cli.GroupProvisioning,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return exitErr(addRepoRun(name, def, upstream))
+			if ensure && (cmd.Flags().Changed("default") || cmd.Flags().Changed("upstream")) {
+				return errors.New("--ensure takes the default branch and upstream from the repo config; drop --default/--upstream")
+			}
+			return exitErr(addRepoRun(name, def, upstream, ensure))
 		},
 	}
 	cmd.Flags().StringVar(&name, "repo", "", "repository name (required)")
 	cmd.Flags().StringVar(&def, "default", "main", "default branch")
 	cmd.Flags().StringVar(&upstream, "upstream", "", "upstream URL to mirror and forward to")
+	cmd.Flags().BoolVar(&ensure, "ensure", false, "provision from the repo config (default_branch, upstream_slug) unless already provisioned")
 	return cmd
 }
 
@@ -232,10 +239,10 @@ that exact release in any direction with no anomaly guard.
   portitor upgrade --version vX.Y.Z install that exact release, any direction
   portitor upgrade --rollback      restore the pre-upgrade binary from <path>.bak
 
-This updates the standalone operator binary only (the one also used for
-add-role/validate-config/reconcile). The container image (gate + egress) is a
-separate artifact rebuilt from the Dockerfile — upgrade does not touch it; see
-docs/deploy.md.`,
+This updates the portitor/portitor-gate pair only: portitor (the operator
+binary, also used for add-role/validate-config/reconcile/deploy) and the linux
+portitor-gate beside it, as one unit. A running gate keeps its image until the
+next portitor deploy bakes the new portitor-gate; see docs/deploy.md.`,
 		GroupID: cli.GroupProvisioning,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -264,6 +271,37 @@ func newShellCmd() *cobra.Command {
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return exitErr(shellCommand(args))
+		},
+	}
+}
+
+func newDeployCmd() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:     "deploy --config <file>",
+		Short:   "Build the gate image with Nix and replace the gate container",
+		Long:    "Build the gate image with Nix from the deploy config and replace the gate\ncontainer with a verified one, restoring the previous gate if the new one\nfails. See spec/delivery/arch_deploy.md.",
+		GroupID: cli.GroupProvisioning,
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if configPath == "" {
+				return errors.New("--config is required")
+			}
+			return exitErr(deployRun(configPath, cmd.OutOrStdout(), cmd.ErrOrStderr()))
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "the deploy config file (required)")
+	return cmd
+}
+
+func newGitCredentialCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "git-credential <get|store|erase>",
+		Short:   "git credential helper: answers github.com from the gate's credential file",
+		GroupID: cli.GroupGate,
+		Args:    cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return exitErr(gitCredential(args, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()))
 		},
 	}
 }

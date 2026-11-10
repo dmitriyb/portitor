@@ -211,7 +211,7 @@ func TestValidate(t *testing.T) {
 		t.Fatal("the retired internal review source should be invalid")
 	}
 	goodChecks := good
-	goodChecks.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "bead-closed", Command: []string{"br", "--no-db"}}}}
+	goodChecks.MergeGate = &action.MergeGateConfig{Checks: []action.CheckPredicate{{Name: "approved", Command: []string{"record-check", "--approved"}}}}
 	if p := Validate(goodChecks); len(p) != 0 {
 		t.Fatalf("a well-formed check predicate should validate: %v", p)
 	}
@@ -378,12 +378,12 @@ func TestDecodeDiscipline(t *testing.T) {
 	}
 
 	withMergeGate := `{"format_version":1,"default_branch":"main","allowed_signers":"x","roles":{"` + fp + `":"reviewer"},` +
-		`"merge_gate":{"review":"github","checks":[{"name":"bead-closed","command":["br","--no-db"]}]}}`
+		`"merge_gate":{"review":"github","checks":[{"name":"approved","command":["record-check","--approved"]}]}}`
 	if s, err := LoadFile(write(t, withMergeGate)); err != nil {
 		t.Fatalf("merge_gate config: %v", err)
 	} else if s.MergeGate == nil ||
 		s.MergeGate.Review != "github" || len(s.MergeGate.Checks) != 1 ||
-		s.MergeGate.Checks[0].Name != "bead-closed" || len(s.MergeGate.Checks[0].Command) != 2 {
+		s.MergeGate.Checks[0].Name != "approved" || len(s.MergeGate.Checks[0].Command) != 2 {
 		t.Fatalf("merge_gate decoded as %+v", s)
 	}
 

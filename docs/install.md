@@ -1,11 +1,13 @@
 # Installing portitor
 
 One binary is published on the [GitHub Releases page][releases]: `portitor`
-(linux/darwin, amd64/arm64). It is the same binary the container image runs,
-and it is useful standalone on an operator's machine for `add-role`,
-`validate-config` and `reconcile`. The container image (gate + egress) is
-**not** a release artifact: build it from this repository's `Dockerfile` with
-`docker build -t portitor .`, see [`deploy.md`](deploy.md). Every release
+(linux/darwin, amd64/arm64). `install.sh` installs it together with
+`portitor-gate`, the linux build for the host's arch (the same archive on a
+linux host), which `portitor deploy` bakes into the gate image; it is the same
+program. `portitor` is also useful standalone on an operator's machine for
+`add-role`, `validate-config` and `reconcile`. The gate image is **not** a
+release artifact: `portitor deploy` builds it locally with Nix, see
+[`deploy.md`](deploy.md). Every release
 archive is signed with SSHSIG (`ssh-keygen -Y sign`), verifiable with the
 `ssh-keygen` that ships with OpenSSH — no extra tool to install just to verify.
 
@@ -117,8 +119,10 @@ An installed binary updates itself with `portitor upgrade`, which embeds the
 same signed `install.sh` and runs it against the running binary's own path:
 the same resolve → download → SSHSIG-verify, then a safe in-place swap
 (move-aside plus `rename(2)`, never a write over the running file), keeping
-the previous binary as `<path>.bak`. `upgrade` maintains the standalone
-binary only; the container image is rebuilt from the `Dockerfile`, as above.
+the previous binary as `<path>.bak`. `upgrade` replaces the
+`portitor`/`portitor-gate` pair as one unit (and repairs a missing or
+mismatched `portitor-gate`); a running gate changes at the next
+`portitor deploy`.
 
 Upgrade is **forward-only**: it hard-refuses, non-overridably, a resolved
 latest that is *older* than the installed version — a signature proves

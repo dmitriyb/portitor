@@ -28,6 +28,7 @@
 #   INSTALL_DIR=~/bin sh install.sh          install somewhere other than /usr/local/bin
 #   sh install.sh --tool portitor-mcp        install the MCP mediator binary instead
 #   sh install.sh --upgrade --target <path>  replace the binary at <path> in place
+#                                            (with --gate-target <path> for portitor-gate)
 #   sh install.sh --upgrade --target <path> --check     report current vs latest only
 #   sh install.sh --upgrade --target <path> --rollback  restore <path>.bak
 #
@@ -171,6 +172,8 @@ CHECK=0
 ROLLBACK=0
 TARGET=""
 CURRENT=""
+GATE_TARGET=""
+GATE_CURRENT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -181,6 +184,10 @@ while [ $# -gt 0 ]; do
     --rollback) ROLLBACK=1 ;;
     --current) shift; CURRENT="${1:-}" ;;
     --current=*) CURRENT="${1#--current=}" ;;
+    --gate-target) shift; GATE_TARGET="${1:-}" ;;
+    --gate-target=*) GATE_TARGET="${1#--gate-target=}" ;;
+    --gate-current) shift; GATE_CURRENT="${1:-}" ;;
+    --gate-current=*) GATE_CURRENT="${1#--gate-current=}" ;;
     --version) shift; VERSION="${1:-}" ;;
     --version=*) VERSION="${1#--version=}" ;;
     --tool) shift; TOOL="${1:-}" ;;
@@ -199,6 +206,17 @@ case "$TOOL" in
   *) fail "unknown --tool: $TOOL (this project ships portitor and portitor-mcp)" ;;
 esac
 
+# Tool portitor is installed as a pair: the tool, and the linux build for the
+# host's arch beside it as portitor-gate, which `portitor deploy` bakes into the
+# gate image. portitor-mcp has no gate binary.
+GATE=""
+if [ "$TOOL" = portitor ]; then
+  GATE=1
+  if [ -z "$GATE_TARGET" ] && [ -n "$TARGET" ]; then
+    GATE_TARGET="$(dirname "$TARGET")/portitor-gate"
+  fi
+fi
+
 need curl
 need ssh-keygen
 need tar
@@ -209,7 +227,12 @@ need uname
 if [ "$ROLLBACK" -eq 1 ]; then
   [ "$MODE" = upgrade ] || fail "--rollback is only valid with --upgrade"
   [ -n "$TARGET" ] || fail "--rollback requires --target <path>"
-  do_rollback "$TARGET"
+  # The gate goes first: if it cannot be restored the tool is left alone, so
+  # the pair is never split by a half-done rollback.
+  if [ -n "$GATE" ] && [ -e "${GATE_TARGET}.bak" ]; then
+    (do_rollback "$GATE_TARGET") || fail "could not roll back portitor-gate at ${GATE_TARGET}; ${TARGET} left as it is"
+  fi
+  (do_rollback "$TARGET") || fail "rolled back portitor-gate but not ${TARGET}: the pair is split — run 'portitor upgrade' to repair it"
   exit 0
 fi
 
@@ -271,6 +294,19 @@ if [ "$MODE" = upgrade ]; then
   if [ -n "$cur" ] && [ "$cur" != "dev" ]; then
     cmp=$(ver_cmp "$version" "$cur")
   fi
+  # The pair is current only when portitor-gate is at the target version too. A
+  # linux gate binary cannot run on a darwin host, so there its version comes
+  # only from --gate-current; unknown means "repair it".
+  gate_ok=1
+  if [ -n "$GATE" ]; then
+    gcur="$GATE_CURRENT"
+    if [ -z "$gcur" ] && [ "$goos" = linux ] && [ -x "$GATE_TARGET" ]; then
+      gcur=$(binary_version "$GATE_TARGET")
+    fi
+    if [ -z "$gcur" ] || [ "$gcur" = dev ] || [ "$(ver_cmp "$version" "$gcur")" -ne 0 ]; then
+      gate_ok=""
+    fi
+  fi
 
   if [ "$CHECK" -eq 1 ]; then
     # --check / --dry-run: report availability only, change nothing on disk. It
@@ -278,6 +314,8 @@ if [ "$MODE" = upgrade ]; then
     # older than installed, which it flags as an anomaly WARNING (still exit 0).
     if [ -z "$cmp" ]; then
       echo "$TOOL: latest v${version} (current version could not be determined)" >&2
+    elif [ "$cmp" -eq 0 ] && [ -z "$gate_ok" ]; then
+      echo "$TOOL: v${cur#v} is current but portitor-gate at ${GATE_TARGET} is missing or another version; an upgrade would repair it" >&2
     elif [ "$cmp" -eq 0 ]; then
       echo "$TOOL: up to date (v${cur#v})" >&2
     elif [ "$cmp" -gt 0 ]; then
@@ -296,6 +334,8 @@ if [ "$MODE" = upgrade ]; then
     # path there is nothing to order — just install the named release.
     [ -n "$EXPLICIT_VERSION" ] || \
       echo "$TOOL: installed version is unknown (dev build); cannot order it against the resolved latest ${tag} — proceeding without the forward-only check" >&2
+  elif [ "$cmp" -eq 0 ] && [ -z "$gate_ok" ]; then
+    echo "$TOOL upgrade: v${version} is current; repairing portitor-gate at ${GATE_TARGET}" >&2
   elif [ "$cmp" -eq 0 ]; then
     echo "$TOOL upgrade: already at v${version}; nothing changed" >&2
     exit 0
@@ -346,8 +386,43 @@ tar -xzf "${workdir}/${archive}" -C "$workdir" "$TOOL" \
   || fail "failed to extract the $TOOL binary from ${archive}"
 chmod 755 "${workdir}/$TOOL"
 
+# --- the gate binary: the same archive on a linux host, else the linux one ---
+if [ -n "$GATE" ]; then
+  gatedir="${workdir}/gate"
+  mkdir -p "$gatedir"
+  if [ "$goos" = linux ]; then
+    cp "${workdir}/$TOOL" "${gatedir}/portitor"
+  else
+    garchive="portitor_${version}_linux_${goarch}.tar.gz"
+    echo "$TOOL installer: fetching ${garchive} for portitor-gate (${tag})" >&2
+    curl -fsSL "${base_url}/${garchive}" -o "${gatedir}/${garchive}" \
+      || fail "download failed: ${base_url}/${garchive}"
+    curl -fsSL "${base_url}/${garchive}.sig" -o "${gatedir}/${garchive}.sig" \
+      || fail "download failed: ${base_url}/${garchive}.sig"
+    if ! ssh-keygen -Y verify \
+      -f "$allowed_signers" \
+      -I "$SIGNER_ID" \
+      -n file \
+      -s "${gatedir}/${garchive}.sig" \
+      <"${gatedir}/${garchive}" >&2; then
+      fail "signature verification FAILED for ${garchive} — refusing to install an unverified binary"
+    fi
+    tar -xzf "${gatedir}/${garchive}" -C "$gatedir" portitor \
+      || fail "failed to extract the portitor binary from ${garchive}"
+  fi
+  chmod 755 "${gatedir}/portitor"
+fi
+
 if [ "$MODE" = upgrade ]; then
   self_replace "$TARGET" "${workdir}/$TOOL"
+  if [ -n "$GATE" ]; then
+    # Both files move as one unit: a failed gate replace restores the tool.
+    if ! (self_replace "$GATE_TARGET" "${gatedir}/portitor"); then
+      mv -f "${TARGET}.bak" "$TARGET" 2>/dev/null || true
+      fail "could not install portitor-gate at ${GATE_TARGET}; restored the previous ${TARGET}"
+    fi
+    echo "$TOOL: portitor-gate at ${GATE_TARGET} is v${version}" >&2
+  fi
   # Render the from-version v-prefixed to match the release-tag form of the
   # to-version; "unknown" when the current version could not be determined.
   cur_disp="unknown"
@@ -357,11 +432,14 @@ if [ "$MODE" = upgrade ]; then
 else
   if [ -w "$INSTALL_DIR" ]; then
     install -m 0755 "${workdir}/$TOOL" "${INSTALL_DIR}/$TOOL"
+    [ -z "$GATE" ] || install -m 0755 "${gatedir}/portitor" "${INSTALL_DIR}/portitor-gate"
   else
     echo "$TOOL installer: ${INSTALL_DIR} is not writable, retrying with sudo" >&2
     need sudo
     sudo install -m 0755 "${workdir}/$TOOL" "${INSTALL_DIR}/$TOOL"
+    [ -z "$GATE" ] || sudo install -m 0755 "${gatedir}/portitor" "${INSTALL_DIR}/portitor-gate"
   fi
   echo "$TOOL installed to ${INSTALL_DIR}/$TOOL" >&2
+  [ -z "$GATE" ] || echo "$TOOL: portitor-gate installed to ${INSTALL_DIR}/portitor-gate" >&2
   "${INSTALL_DIR}/$TOOL" version || true
 fi

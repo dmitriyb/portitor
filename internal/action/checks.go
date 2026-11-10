@@ -13,7 +13,6 @@ package action
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -114,18 +113,17 @@ func (c *ChecksConfig) LogTailBytesOrDefault() int {
 
 // ---- the checks verb ----
 
-// CheckStatus is one check of a ChecksReport: the widened statusCheckRollup
-// fields plus the owning run/job ids the gate parsed out of detailsUrl (so a
-// caller never parses URLs in shell), the run's attempt number, and the
+// CheckStatus is one check of a ChecksReport: its state, the owning run/job
+// ids (so a caller never parses URLs), the run's attempt number, and the
 // check's resolved stuck budget.
 type CheckStatus struct {
 	Name         string `json:"name"`
-	Status       string `json:"status"`     // QUEUED | IN_PROGRESS | COMPLETED (empty for legacy status contexts)
-	Conclusion   string `json:"conclusion"` // conclusion, or the legacy context's state
+	Status       string `json:"status"`     // QUEUED | IN_PROGRESS | COMPLETED (empty for commit statuses)
+	Conclusion   string `json:"conclusion"` // conclusion, or the commit status's state
 	StartedAt    string `json:"startedAt"`
 	CompletedAt  string `json:"completedAt"`
 	WorkflowName string `json:"workflowName"`
-	RunID        int64  `json:"runId"` // 0 when the check has no resolvable Actions run (legacy contexts, external apps)
+	RunID        int64  `json:"runId"` // 0 for a commit status, which has no Actions run
 	JobID        int64  `json:"jobId"`
 	RunAttempt   int    `json:"runAttempt"`
 	// BudgetSeconds is the check's resolved stuck budget — data for the
@@ -142,34 +140,15 @@ type ChecksReport struct {
 	Checks           []CheckStatus `json:"checks"`
 }
 
-// actionsRunJobRe extracts the run and job ids a check run's detailsUrl
-// embeds (…/actions/runs/<run>/job/<job>). Legacy status contexts and
-// external-app checks carry other URLs and simply resolve to 0/0.
-var actionsRunJobRe = regexp.MustCompile(`/actions/runs/(\d+)/job/(\d+)`)
-
-// runJobIDs parses a detailsUrl into its run/job ids (0, 0 when the URL is
-// not an Actions job URL).
-func runJobIDs(detailsURL string) (runID, jobID int64) {
-	m := actionsRunJobRe.FindStringSubmatch(detailsURL)
-	if m == nil {
-		return 0, 0
-	}
-	runID, _ = strconv.ParseInt(m[1], 10, 64)
-	jobID, _ = strconv.ParseInt(m[2], 10, 64)
-	return runID, jobID
-}
-
 // BuildChecksReport assembles the checks verb's response from the re-derived
-// merge state and the per-run attempt numbers (pure — the I/O lives in
-// GH.Checks).
-func BuildChecksReport(st MergeState, attempts map[int64]int, cfg *ChecksConfig) ChecksReport {
+// merge state and its head's checks (pure — the I/O lives in GH.Checks).
+func BuildChecksReport(st MergeState, cfg *ChecksConfig) ChecksReport {
 	report := ChecksReport{
 		MergeStateStatus: st.MergeStateStatus,
 		HeadRefOid:       st.HeadSHA,
-		Checks:           make([]CheckStatus, 0, len(st.StatusCheckRollup)),
+		Checks:           make([]CheckStatus, 0, len(st.Checks)),
 	}
-	for _, c := range st.StatusCheckRollup {
-		runID, jobID := runJobIDs(c.DetailsURL)
+	for _, c := range st.Checks {
 		conclusion := c.Conclusion
 		if conclusion == "" {
 			conclusion = c.State
@@ -182,43 +161,89 @@ func BuildChecksReport(st MergeState, attempts map[int64]int, cfg *ChecksConfig)
 			StartedAt:     c.StartedAt,
 			CompletedAt:   c.CompletedAt,
 			WorkflowName:  c.WorkflowName,
-			RunID:         runID,
-			JobID:         jobID,
-			RunAttempt:    attempts[runID],
+			RunID:         c.RunID,
+			JobID:         c.JobID,
+			RunAttempt:    c.RunAttempt,
 			BudgetSeconds: int(cfg.BudgetFor(name) / time.Second),
 		})
 	}
 	return report
 }
 
-// Checks returns the checks verb's JSON: per-check state (statusCheckRollup,
-// widened) folded together with each owning run's run_attempt (from the run
-// object — the rollup lacks it) and the PR's mergeStateStatus/headRefOid.
+// Checks returns the checks verb's JSON: the PR's merge-readiness fields and
+// every check on its head.
 func (g GH) Checks(pr int, cfg *ChecksConfig) (string, error) {
 	st, err := g.FetchMergeState(pr)
 	if err != nil {
 		return "", err
 	}
-	attempts := map[int64]int{}
-	for _, c := range st.StatusCheckRollup {
-		runID, _ := runJobIDs(c.DetailsURL)
-		if runID == 0 {
-			continue // no resolvable Actions run behind this check
-		}
-		if _, done := attempts[runID]; done {
-			continue
-		}
-		run, err := g.fetchRun(runID)
-		if err != nil {
-			return "", fmt.Errorf("checks: %w", err)
-		}
-		attempts[runID] = run.RunAttempt
+	if st.Checks, err = g.FetchHeadChecks(st.HeadSHA); err != nil {
+		return "", fmt.Errorf("checks: %w", err)
 	}
-	b, err := json.Marshal(BuildChecksReport(st, attempts, cfg))
+	b, err := json.Marshal(BuildChecksReport(st, cfg))
 	if err != nil {
 		return "", fmt.Errorf("checks: marshal report: %w", err)
 	}
 	return string(b), nil
+}
+
+// FetchHeadChecks reads every check on head from the two sources a
+// fine-grained PAT can read: the Actions jobs of the head's workflow runs
+// (Actions: read) and the head's commit statuses (Commit statuses: read).
+// Check runs posted by other GitHub Apps are visible only through the Checks
+// API and so are not reported.
+func (g GH) FetchHeadChecks(head string) ([]CheckRun, error) {
+	if head == "" {
+		return nil, fmt.Errorf("checks: no head commit to read checks for")
+	}
+	runs, err := g.headRuns(head)
+	if err != nil {
+		return nil, err
+	}
+	checks := checksFromRuns(runs)
+	owner, name, err := g.ownerName()
+	if err != nil {
+		return nil, err
+	}
+	out, err := g.runAPI("api", fmt.Sprintf("repos/%s/%s/commits/%s/status?per_page=100", owner, name, head))
+	if err != nil {
+		return nil, err
+	}
+	var combined struct {
+		Statuses []struct {
+			Context string `json:"context"`
+			State   string `json:"state"`
+		} `json:"statuses"`
+	}
+	if err := json.Unmarshal([]byte(out), &combined); err != nil {
+		return nil, fmt.Errorf("parse commit statuses: %w", err)
+	}
+	for _, s := range combined.Statuses {
+		checks = append(checks, CheckRun{Context: s.Context, State: strings.ToUpper(s.State)})
+	}
+	return checks, nil
+}
+
+// checksFromRuns turns workflow runs into one check per job of each run's
+// latest attempt (pure).
+func checksFromRuns(runs []WorkflowRun) []CheckRun {
+	var checks []CheckRun
+	for _, r := range runs {
+		for _, j := range r.Jobs {
+			checks = append(checks, CheckRun{
+				Name:         j.Name,
+				Status:       strings.ToUpper(j.Status),
+				Conclusion:   strings.ToUpper(j.Conclusion),
+				StartedAt:    j.StartedAt,
+				CompletedAt:  j.CompletedAt,
+				WorkflowName: r.Name,
+				RunID:        r.ID,
+				JobID:        j.ID,
+				RunAttempt:   r.RunAttempt,
+			})
+		}
+	}
+	return checks
 }
 
 // ---- run/job state (shared by rerun + logs) ----
@@ -237,10 +262,12 @@ type WorkflowRun struct {
 
 // WorkflowJob is one job of a workflow run's latest attempt.
 type WorkflowJob struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion"`
+	StartedAt   string `json:"started_at"`
+	CompletedAt string `json:"completed_at"`
 }
 
 // RunState is the Actions-side state rerun/logs decide over: the PR's head
@@ -288,37 +315,13 @@ func (g GH) prHeadSHA(pr int) (string, error) {
 // a caller-supplied id), fetches each run's latest-attempt jobs, then
 // re-derives the PR head for the stale comparison.
 func (g GH) FetchRunState(pr int) (RunState, error) {
-	owner, name, err := g.ownerName()
-	if err != nil {
-		return RunState{}, err
-	}
 	head, err := g.prHeadSHA(pr)
 	if err != nil {
 		return RunState{}, err
 	}
-	out, err := g.runAPI("api", fmt.Sprintf("repos/%s/%s/actions/runs?head_sha=%s&per_page=100", owner, name, head))
+	runs, err := g.headRuns(head)
 	if err != nil {
 		return RunState{}, err
-	}
-	var listed struct {
-		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
-	}
-	if err := json.Unmarshal([]byte(out), &listed); err != nil {
-		return RunState{}, fmt.Errorf("parse workflow runs: %w", err)
-	}
-	runs := listed.WorkflowRuns
-	for i := range runs {
-		jobsOut, err := g.runAPI("api", fmt.Sprintf("repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100", owner, name, runs[i].ID))
-		if err != nil {
-			return RunState{}, err
-		}
-		var jobs struct {
-			Jobs []WorkflowJob `json:"jobs"`
-		}
-		if err := json.Unmarshal([]byte(jobsOut), &jobs); err != nil {
-			return RunState{}, fmt.Errorf("parse jobs of run %d: %w", runs[i].ID, err)
-		}
-		runs[i].Jobs = jobs.Jobs
 	}
 	// Re-derive the head AFTER the queries above: a push landing meanwhile
 	// makes the runs stale, and PlanRerun must see that.
@@ -327,6 +330,39 @@ func (g GH) FetchRunState(pr int) (RunState, error) {
 		return RunState{}, err
 	}
 	return RunState{HeadSHA: headNow, Runs: runs}, nil
+}
+
+// headRuns lists head's workflow runs, each with its latest attempt's jobs.
+func (g GH) headRuns(head string) ([]WorkflowRun, error) {
+	owner, name, err := g.ownerName()
+	if err != nil {
+		return nil, err
+	}
+	out, err := g.runAPI("api", fmt.Sprintf("repos/%s/%s/actions/runs?head_sha=%s&per_page=100", owner, name, head))
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		WorkflowRuns []WorkflowRun `json:"workflow_runs"`
+	}
+	if err := json.Unmarshal([]byte(out), &listed); err != nil {
+		return nil, fmt.Errorf("parse workflow runs: %w", err)
+	}
+	runs := listed.WorkflowRuns
+	for i := range runs {
+		jobsOut, err := g.runAPI("api", fmt.Sprintf("repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100", owner, name, runs[i].ID))
+		if err != nil {
+			return nil, err
+		}
+		var jobs struct {
+			Jobs []WorkflowJob `json:"jobs"`
+		}
+		if err := json.Unmarshal([]byte(jobsOut), &jobs); err != nil {
+			return nil, fmt.Errorf("parse jobs of run %d: %w", runs[i].ID, err)
+		}
+		runs[i].Jobs = jobs.Jobs
+	}
+	return runs, nil
 }
 
 // ---- the rerun verb ----

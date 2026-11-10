@@ -62,34 +62,21 @@ func TestBudgetFor(t *testing.T) {
 
 // ---- checks report ----
 
-func TestRunJobIDs(t *testing.T) {
-	run, job := runJobIDs("https://github.com/o/r/actions/runs/17032161986/job/48287654321")
-	if run != 17032161986 || job != 48287654321 {
-		t.Fatalf("got run=%d job=%d", run, job)
-	}
-	for _, url := range []string{"", "https://codecov.io/gh/o/r", "https://github.com/o/r/actions/runs/123"} {
-		if r, j := runJobIDs(url); r != 0 || j != 0 {
-			t.Errorf("runJobIDs(%q) = %d,%d, want 0,0", url, r, j)
-		}
-	}
-}
-
-// TestBuildChecksReport pins the report assembly: widened check-run fields,
-// legacy status contexts (conclusion falls back to state; no Actions run so
-// runId/jobId/runAttempt stay 0), the attempts fold-in, and the resolved
-// per-name budget in seconds.
+// TestBuildChecksReport pins the report assembly: Actions-job checks carry
+// their run/job ids and attempt through, a commit status's conclusion falls
+// back to its state with no run, and the per-name budget resolves in seconds.
 func TestBuildChecksReport(t *testing.T) {
 	st := MergeState{
 		MergeStateStatus: "UNSTABLE",
 		HeadSHA:          "deadbeef",
-		StatusCheckRollup: []CheckRun{
+		Checks: []CheckRun{
 			{Name: "test", Status: "IN_PROGRESS", StartedAt: "2026-08-12T10:00:00Z", WorkflowName: "ci",
-				DetailsURL: "https://github.com/o/r/actions/runs/42/job/420"},
+				RunID: 42, JobID: 420, RunAttempt: 2},
 			{Context: "legacy/ctx", State: "SUCCESS"},
 		},
 	}
 	cfg := &ChecksConfig{Budgets: []CheckBudget{{Name: "test", Budget: "97s"}}, DefaultBudget: "2m"}
-	report := BuildChecksReport(st, map[int64]int{42: 2}, cfg)
+	report := BuildChecksReport(st, cfg)
 
 	if report.MergeStateStatus != "UNSTABLE" || report.HeadRefOid != "deadbeef" {
 		t.Fatalf("report header = %+v", report)
@@ -109,22 +96,23 @@ func TestBuildChecksReport(t *testing.T) {
 	}
 }
 
-// TestChecks pins GH.Checks end-to-end over a stubbed runner: one pr-view
-// call plus exactly ONE run fetch per unique run (two checks sharing a run
-// must not fetch it twice), folded into a single JSON response.
 func TestChecks(t *testing.T) {
-	runFetches := 0
+	var calls []string
 	run := func(args ...string) (string, error) {
 		joined := strings.Join(args, " ")
+		calls = append(calls, joined)
 		switch {
 		case args[0] == "pr":
-			return `{"mergeStateStatus":"UNSTABLE","headRefOid":"abc123","statusCheckRollup":[
-				{"name":"build","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"ci","detailsUrl":"https://github.com/o/r/actions/runs/42/job/1"},
-				{"name":"test","status":"IN_PROGRESS","workflowName":"ci","detailsUrl":"https://github.com/o/r/actions/runs/42/job/2"}
+			return `{"mergeStateStatus":"UNSTABLE","headRefOid":"abc123"}`, nil
+		case strings.Contains(joined, "actions/runs?head_sha=abc123"):
+			return `{"workflow_runs":[{"id":42,"name":"ci","head_sha":"abc123","status":"in_progress","run_attempt":3}]}`, nil
+		case strings.Contains(joined, "actions/runs/42/jobs"):
+			return `{"jobs":[
+				{"id":1,"name":"build","status":"completed","conclusion":"success","started_at":"t0","completed_at":"t1"},
+				{"id":2,"name":"test","status":"in_progress","conclusion":null,"started_at":"t0"}
 			]}`, nil
-		case args[0] == "api" && strings.Contains(joined, "actions/runs/42"):
-			runFetches++
-			return `{"id":42,"name":"ci","head_sha":"abc123","status":"in_progress","run_attempt":3}`, nil
+		case strings.Contains(joined, "commits/abc123/status"):
+			return `{"statuses":[{"context":"ext/ci","state":"pending"}]}`, nil
 		default:
 			t.Fatalf("unexpected call: %v", args)
 			return "", nil
@@ -134,23 +122,31 @@ func TestChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runFetches != 1 {
-		t.Fatalf("run fetched %d times, want 1 (two checks share run 42)", runFetches)
+	for _, c := range calls {
+		if strings.Contains(c, "statusCheckRollup") || strings.Contains(c, "check-runs") {
+			t.Fatalf("checks used the Checks API, closed to fine-grained PATs: %q", c)
+		}
 	}
 	var report ChecksReport
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("Checks output not valid JSON: %v\n%s", err, out)
 	}
-	if report.MergeStateStatus != "UNSTABLE" || report.HeadRefOid != "abc123" || len(report.Checks) != 2 {
+	if report.MergeStateStatus != "UNSTABLE" || report.HeadRefOid != "abc123" || len(report.Checks) != 3 {
 		t.Fatalf("report = %+v", report)
 	}
-	for _, c := range report.Checks {
-		if c.RunAttempt != 3 {
-			t.Fatalf("check %q runAttempt = %d, want 3 (from the run object)", c.Name, c.RunAttempt)
-		}
-		if c.BudgetSeconds != int(DefaultCheckBudget/time.Second) {
-			t.Fatalf("check %q budgetSeconds = %d, want the default", c.Name, c.BudgetSeconds)
-		}
+	build, test, ext := report.Checks[0], report.Checks[1], report.Checks[2]
+	if build.Name != "build" || build.Status != "COMPLETED" || build.Conclusion != "SUCCESS" || build.WorkflowName != "ci" ||
+		build.RunID != 42 || build.JobID != 1 || build.RunAttempt != 3 || build.StartedAt != "t0" || build.CompletedAt != "t1" {
+		t.Fatalf("build check = %+v", build)
+	}
+	if test.Name != "test" || test.Status != "IN_PROGRESS" || test.Conclusion != "" || test.JobID != 2 || test.RunAttempt != 3 {
+		t.Fatalf("test check = %+v", test)
+	}
+	if ext.Name != "ext/ci" || ext.Conclusion != "PENDING" || ext.RunID != 0 {
+		t.Fatalf("commit-status check = %+v", ext)
+	}
+	if build.BudgetSeconds != int(DefaultCheckBudget/time.Second) {
+		t.Fatalf("budgetSeconds = %d, want the default", build.BudgetSeconds)
 	}
 }
 

@@ -6,7 +6,13 @@ import (
 	"os/exec"
 	"syscall"
 	"unsafe"
+
+	"github.com/dmitriyb/portitor/internal/credential"
 )
+
+// GHTokenFlag, as the trampoline's first argument, adds the gate's credential
+// to the command's environment as GH_TOKEN.
+const GHTokenFlag = "--gh-token"
 
 // TrampolineMain is the body of the `portitor internal-check-exec` re-exec
 // trampoline: it enters the private workdir, applies the address-space rlimit
@@ -28,8 +34,15 @@ func TrampolineMain(args []string) int {
 		fmt.Fprintf(os.Stderr, TrampolineSentinel+" "+format+"\n", a...)
 		return code
 	}
+	// --gh-token is passed by RunPredicate only: a merge predicate keeps the
+	// access it had through the former stored gh login, while a content check —
+	// run over pushed content, its stderr returned to the pusher — never gets it.
+	withToken := len(args) > 0 && args[0] == GHTokenFlag
+	if withToken {
+		args = args[1:]
+	}
 	if len(args) < 2 {
-		return fail(2, "usage: <workdir> <argv...>")
+		return fail(2, "usage: [%s] <workdir> <argv...>", GHTokenFlag)
 	}
 	dir, argv := args[0], args[1:]
 	if err := os.Chdir(dir); err != nil {
@@ -40,6 +53,15 @@ func TrampolineMain(args []string) int {
 		return fail(127, "%v", err)
 	}
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	if withToken {
+		tok, present, err := credential.Read()
+		if err != nil {
+			return fail(1, "%v", err)
+		}
+		if present {
+			env = append(env, "GH_TOKEN="+tok)
+		}
+	}
 
 	// Pre-allocate everything execve needs, plus the failure report.
 	p0, err := syscall.BytePtrFromString(path0)

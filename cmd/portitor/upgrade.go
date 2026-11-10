@@ -8,7 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"github.com/dmitriyb/portitor/internal/deploy"
 )
 
 // The canonical installer lives at the repo root (install.sh) — the release
@@ -36,8 +39,8 @@ type upgradeOptions struct {
 // the currently-running binary. It is intentionally thin: the resolve /
 // download / SSHSIG-verify / safe self-replace logic lives once, in the script.
 //
-// It does NOT touch the container image, which is a separate artifact rebuilt
-// from the Dockerfile (see the command help and docs/deploy.md).
+// It does NOT touch a running gate: the next `portitor deploy` bakes the new
+// portitor-gate (see the command help and docs/deploy.md).
 func upgradeRun(o upgradeOptions, stdout, stderr io.Writer) int {
 	// Resolve the exact on-disk path of the running binary — the file the
 	// script must replace. EvalSymlinks so a symlinked launcher (e.g.
@@ -75,7 +78,8 @@ func upgradeRun(o upgradeOptions, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	args := []string{tmp, "--upgrade", "--target", exe}
+	gate := filepath.Join(filepath.Dir(exe), "portitor-gate")
+	args := append([]string{tmp, "--upgrade", "--target", exe}, gateArgs(gate)...)
 	if o.check {
 		args = append(args, "--check")
 	}
@@ -143,4 +147,21 @@ func upgradeChildEnv(pinned string) []string {
 		env = append(env, "VERSION="+pinned)
 	}
 	return env
+}
+
+// releaseVersionRE matches a clean release tag; a pseudo-version or (devel)
+// build cannot be ordered against a release and must not read as current.
+var releaseVersionRE = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// gateArgs names the gate binary for the installer and, when its build info
+// carries a release version, that version — read from the file, because a
+// linux portitor-gate cannot be executed on a darwin host.
+func gateArgs(gate string) []string { return gateArgsFrom(gate, deploy.FileBuildID) }
+
+func gateArgsFrom(gate string, read func(string) (deploy.BuildID, error)) []string {
+	args := []string{"--gate-target", gate}
+	if id, err := read(gate); err == nil && releaseVersionRE.MatchString(id.Version) {
+		args = append(args, "--gate-current", strings.TrimPrefix(id.Version, "v"))
+	}
+	return args
 }

@@ -1,6 +1,6 @@
 {
   "name": "delivery",
-  "description": "portitor's release pipeline: how the `portitor` binary gets from a tagged commit to a downloadable, verifiable artifact. Binaries only — the container image is a local build artifact (`docker build -t portitor .`), never published. Generic module: the executable `.goreleaser.yaml` and the CI workflow files are the source of truth for how artifacts are built; this module documents intent and does not define a bespoke delivery-metadata schema. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
+  "description": "portitor's release pipeline: how the `portitor` binary gets from a tagged commit to a downloadable, verifiable artifact. Binaries only — the gate image is built locally by `portitor deploy` with Nix, never published; this module also owns that deploy step. Generic module: the executable `.goreleaser.yaml` and the CI workflow files are the source of truth for how artifacts are built; this module documents intent and does not define a bespoke delivery-metadata schema. NOTE: this module.json is a hand-authored SEED in spexmachina's format — identity hashes (requirement id/preq_id, component spec_node_id) and spec/.snapshot.json are generated when run through `spex` / the /spec skill; they are intentionally omitted here.",
   "requirements": [
     {
       "type": "functional",
@@ -10,7 +10,7 @@
     {
       "type": "functional",
       "title": "Tiered CI by trigger",
-      "description": "pull_request runs the fast gate (go build, go vet, go test). push to main runs the same gate plus `-race`. A nightly schedule fuzzes every `func Fuzz*` discovered in the tree (spec/reviews/2026-07-18.md §5's plan), each under a bounded -fuzztime, with no hardcoded target list to fall out of sync as targets are added. push of a `v*` tag runs the release pipeline. Each workflow sets `concurrency: {cancel-in-progress: true}` scoped to its own ref, and the CI workflow ignores docs-only changes (`**.md`, `spec/**`) so prose edits don't burn a runner."
+      "description": "pull_request runs the fast gate (go build, go vet, go test). push to main runs the same gate plus `-race`. A nightly schedule fuzzes every `func Fuzz*` discovered in the tree (spec/reviews/2026-07-18.md §5's plan), each under a bounded -fuzztime, with no hardcoded target list to fall out of sync as targets are added. pull_request and push to main also run the docker tier (a real daemon with userns-remap, `go test -tags docker`, no secrets) and the acceptance tier (`go test -tags acceptance` against a disposable GitHub repo, its PAT limited to Contents, Pull requests, Actions and Commit statuses on that one private repo with no Workflows permission, reaching the test step's env only; the repo's seed, its one workflow included, is prepared by the operator and the suite only verifies and resets to it — see arch_ci.md); both install Nix with a commit-pinned action and a pinned Nix version and cache the store. The acceptance tier assumes people push portitor's branches; once agents do, a policy freezing `.github/**` for them must come first. push of a `v*` tag runs the release pipeline. Each workflow except the acceptance one sets `concurrency: {cancel-in-progress: true}` scoped to its own ref; the acceptance workflow uses one global, non-cancelling group, because every run resets the same disposable repo, and the CI workflow ignores docs-only changes (`**.md`, `spec/**`) so prose edits don't burn a runner."
     },
     {
       "type": "functional",
@@ -30,12 +30,17 @@
     {
       "type": "functional",
       "title": "Binaries-only release channel",
-      "description": "The GitHub Releases page is the only publication channel: each release carries the four archives, a consolidated `checksums.txt`, one `.sha256` per archive, one SSHSIG `.sig` per archive, `manifest.json`, and the `install.sh` installer alongside its SSHSIG `install.sh.sig` signature (published and signed with the same release key as the archives). No container image or package-manager formula is published by this pipeline — the Dockerfile is a local build artifact the operator runs `docker build` against themselves."
+      "description": "The GitHub Releases page is the only publication channel: each release carries the four archives, a consolidated `checksums.txt`, one `.sha256` per archive, one SSHSIG `.sig` per archive, `manifest.json`, and the `install.sh` installer alongside its SSHSIG `install.sh.sig` signature (published and signed with the same release key as the archives). No container image or package-manager formula is published by this pipeline — the gate image is built on the operator's host by `portitor deploy` (see arch_deploy.md)."
     },
     {
       "type": "functional",
       "title": "In-place self-update via the embedded installer",
-      "description": "`portitor upgrade` updates the installed standalone binary in place by reusing the signed install.sh — embedded into the binary and run in an upgrade mode against the running binary's own path — never a Go reimplementation of the update. install.sh gains an opt-in upgrade mode (--upgrade --target <path>) that keeps its resolve/download/ssh-keygen-Y-verify logic untouched and adds: a safe self-replace (move-aside + rename(2), never install/cp over the running file, to avoid ETXTBSY); a forward-only version guard (equal → already-up-to-date, exit 0; on the latest path — VERSION unset — a resolved latest OLDER than current is a rollback anomaly, hard-refused and NOT overridable, there being no --force; on the explicit path — VERSION set, i.e. --version vX.Y.Z — the named release installs in any direction with an 'as explicitly requested' notice; a signature is authenticity not freshness, so a latest that moved backward is treated as a compromised origin); --rollback (restore <target>.bak, and auto-restore it on any mid-replace failure); --check/--dry-run (report availability only, exit 0 even when latest is older than installed, flagging it as an anomaly WARNING); and RequireRoot with NO auto-sudo (probe target-dir writability and tell the operator to elevate, rather than self-invoking sudo as first-install mode may). first-install mode (no flags) is behaviour-preserving."
+      "description": "`portitor upgrade` updates the installed `portitor`/`portitor-gate` pair in place, as one unit, by reusing the signed install.sh — embedded into the binary and run in an upgrade mode against the running binary's own path — never a Go reimplementation of the update. install.sh gains an opt-in upgrade mode (--upgrade --target <path>) that keeps its resolve/download/ssh-keygen-Y-verify logic untouched and adds: a safe self-replace (move-aside + rename(2), never install/cp over the running file, to avoid ETXTBSY); a forward-only version guard (equal → already-up-to-date, exit 0; on the latest path — VERSION unset — a resolved latest OLDER than current is a rollback anomaly, hard-refused and NOT overridable, there being no --force; on the explicit path — VERSION set, i.e. --version vX.Y.Z — the named release installs in any direction with an 'as explicitly requested' notice; a signature is authenticity not freshness, so a latest that moved backward is treated as a compromised origin); --rollback (restore <target>.bak, and auto-restore it on any mid-replace failure); --check/--dry-run (report availability only, exit 0 even when latest is older than installed, flagging it as an anomaly WARNING); and RequireRoot with NO auto-sudo (probe target-dir writability and tell the operator to elevate, rather than self-invoking sudo as first-install mode may). first-install mode (no flags) is behaviour-preserving."
+    },
+    {
+      "type": "functional",
+      "title": "The gate binary is installed beside the tool",
+      "description": "install.sh, for tool `portitor`, also fetches the release's `linux_<arch>` archive for the host's arch, verifies it against the same release key, and installs its binary as `portitor-gate` beside `portitor` (on a Linux host it is the same archive, fetched once). `--gate-target` names its path (default: beside `--target`). Upgrade and `--rollback` replace and restore both files as one unit, and the pair is up to date only when both are at the target version, so a missing or mismatched `portitor-gate` is repaired; `portitor upgrade` reads `portitor-gate`'s version from its build info and passes it in, because a linux binary cannot be executed on a darwin host. The release artifacts do not change."
     },
     {
       "type": "non-functional",
@@ -51,12 +56,47 @@
       "type": "non-functional",
       "title": "Locally provable before automation runs",
       "description": "The identical `.goreleaser.yaml` and `scripts/generate-manifest.sh` that the release workflow drives also run unmodified via `goreleaser release --snapshot --clean` on a developer machine (snapshot mode skips publish/tag requirements) — the full build → archive → sign → checksum → manifest chain is provable without pushing a tag, holding CI secrets, or touching GitHub Actions."
+    },
+    {
+      "type": "functional",
+      "title": "One idempotent deploy command for the gate",
+      "description": "`portitor deploy --config <file>` builds the gate image with Nix and replaces the gate container so that exactly one verified gate runs for the deploy config; an unchanged config rebuilds nothing. The deploy config is a strictly decoded, host-local JSON file holding names and paths, never a secret. Runs under an exclusive per-name lock. See arch_deploy.md."
+    },
+    {
+      "type": "functional",
+      "title": "The gate shares no host path",
+      "description": "The gate container's only mounts are two named volumes: the mirrors at /srv/git and the SSH host key at /var/lib/portitor/hostkey. The config dir is the image's top layer at /etc/portitor, root-owned with normalized modes, so nothing the gate reads depends on host file ownership — what a userns-remapped daemon requires."
+    },
+    {
+      "type": "functional",
+      "title": "The image is portitor's fixed part plus the operator's declared tools",
+      "description": "The image is a Nix dockerTools.buildLayeredImage over a nixpkgs pin compiled into portitor (overridable per deploy), built for the host's arch on Linux. portitor fixes the runtime, identity, sshd configuration, directories, entrypoint and gate binary; the operator declares only extra tools for their policy commands as {packages, overlay, pin}. portitor bakes no tool any policy names. The tag is a content hash over the rendered expression and every staged input."
+    },
+    {
+      "type": "functional",
+      "title": "The PAT reaches the gate only as a copied-in file",
+      "description": "The PAT comes from the deploy config's token_command (stdout) and reaches the gate only as /run/secrets/gh_token, streamed into the created container with docker cp and compared byte for byte after a copy back — never an env var, an argv, an image layer or a host file. GH_TOKEN and GITHUB_TOKEN are removed from every docker and nix child's environment."
+    },
+    {
+      "type": "functional",
+      "title": "A deploy never leaves the gate worse than it found it",
+      "description": "Everything that can refuse — config, gate binary pair and arch, networks, a foreign same-named container, repo config validation as git inside the image, the host-key pin, the PAT — is checked before any container changes. The new gate is created and given its PAT under a temporary name; the previous gate is stopped (not removed) only then, and is restored and restarted if the new one fails to become ready or verified. Volumes are never removed. A later deploy resolves an interrupted one's leftovers by label."
+    },
+    {
+      "type": "functional",
+      "title": "Deploy success is read back, never taken from exit codes",
+      "description": "After the swap, deploy reads the state back: the container is running with exactly the two volumes and no GH_TOKEN env; the token file is git-owned 0400; the host key the running sshd serves equals the volume's key and the pin; and, for every repo config with an upstream_slug, GitHub accepts the PAT for that repo. A deploy whose repos have no upstream makes no GitHub call."
+    },
+    {
+      "type": "functional",
+      "title": "The host key persists and is pinned",
+      "description": "The gate's ed25519 host key lives in its own volume and survives every recreate. deploy writes it to the pin file on first deploy and refuses when the volume's key differs from the pin, or when the volume is empty while a pin exists. Rotation is explicit: remove the volume and the pin file."
     }
   ],
   "components": [
     {
       "name": "CIPipeline",
-      "description": "`.github/workflows/ci.yml` + `fuzz.yml`: the pull_request/push-to-main fast-then-race gate (go build, go vet, go test, and -race on push only), and the nightly fuzz job that discovers every `func Fuzz*` in the tree at run time via a two-line grep/awk loop (no hardcoded target list) and runs each with a bounded -fuzztime, uploading any failing corpus entry as a workflow artifact on failure.",
+      "description": "`.github/workflows/ci.yml` + `fuzz.yml` + `acceptance.yml`: the docker tier (userns-remap daemon, Nix installed) on pull_request and push to main; the acceptance tier in `acceptance.yml` on the same triggers, in one global non-cancelling concurrency group; the pull_request/push-to-main fast-then-race gate (go build, go vet, go test, and -race on push only), and the nightly fuzz job that discovers every `func Fuzz*` in the tree at run time via a two-line grep/awk loop (no hardcoded target list) and runs each with a bounded -fuzztime, uploading any failing corpus entry as a workflow artifact on failure.",
       "content": "arch_ci.md",
       "implements": []
     },
@@ -80,8 +120,14 @@
     },
     {
       "name": "SelfUpdate",
-      "description": "install.sh's upgrade mode (opt-in via --upgrade --target <path>), embedded into the binary and driven by `portitor upgrade`: shared resolve/download/SSHSIG-verify with first-install, plus safe self-replace (move-aside + rename to avoid ETXTBSY), a forward-only version guard (equal → no-op; a resolved latest older than installed is a non-overridable rollback-anomaly refusal on the latest path, while an explicitly named --version installs any direction; there is no --force), --rollback, --check (report-only, warns-not-refuses on an older latest), and RequireRoot-no-sudo. Includes the embedded==released byte-identity invariant (cmd/portitor/install.sh via go:generate, enforced by a go test) and the test-only origin hooks. The Go front-end is the cli module's UpgradeCommand.",
+      "description": "install.sh's upgrade mode (opt-in via --upgrade --target <path> [--gate-target <path>]), replacing the `portitor`/`portitor-gate` pair as one unit, embedded into the binary and driven by `portitor upgrade`: shared resolve/download/SSHSIG-verify with first-install, plus safe self-replace (move-aside + rename to avoid ETXTBSY), a forward-only version guard (equal → no-op; a resolved latest older than installed is a non-overridable rollback-anomaly refusal on the latest path, while an explicitly named --version installs any direction; there is no --force), --rollback, --check (report-only, warns-not-refuses on an older latest), and RequireRoot-no-sudo. Includes the embedded==released byte-identity invariant (cmd/portitor/install.sh via go:generate, enforced by a go test) and the test-only origin hooks. The Go front-end is the cli module's UpgradeCommand.",
       "content": "arch_self_update.md",
+      "implements": []
+    },
+    {
+      "name": "Deploy",
+      "description": "`portitor deploy`: the deploy config, the Nix image (fixed part, declared tools, content-hashed tag), and the lock → preflight → build → validate → host key → PAT → create → deliver → swap → wait → verify → commit sequence with rollback. Drives docker and nix as subprocesses. The Go front-end is the cli module's DeployCommand; the entrypoint it embeds is the gate module's Container.",
+      "content": "arch_deploy.md",
       "implements": []
     }
   ]

@@ -12,7 +12,12 @@ Tests for `UpgradeCommand` (`cmd/portitor/upgrade_test.go`). The command's own l
 ### 2. Help scopes to the binary, not the image
 
 **Input**: `upgrade --help`.
-**Expected**: exit 0; stdout lists the flags (`--check`, `--version`, `--rollback`), describes the upgrade as `forward-only` (there is no `--force`), and states that `upgrade` maintains the standalone binary only, with the container image rebuilt from the `Dockerfile`. (`TestUpgradeHelpScopesToBinaryNotImage`.)
+**Expected**: exit 0; stdout lists the flags (`--check`, `--version`, `--rollback`), describes the upgrade as `forward-only` (there is no `--force`), and states that `upgrade` maintains the `portitor`/`portitor-gate` pair only, with a running gate changing at the next `portitor deploy`. (`TestUpgradeHelpScopesToBinaryNotImage`.)
+
+### 2a. The gate binary travels with the upgrade
+
+**Input**: `upgrade` with a `portitor-gate` beside the binary whose build info says an older version.
+**Expected**: the script receives `--gate-target <that path>` and `--gate-current <its version>`; with no `portitor-gate` present it receives `--gate-target` and no `--gate-current`.
 
 ### 3. Fake-origin harness rides the Go test gate
 

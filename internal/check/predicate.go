@@ -54,7 +54,7 @@ func RunPredicate(command []string, workdir string, extraArgs ...string) error {
 	full := make([]string, 0, len(command)+len(extraArgs))
 	full = append(full, command...)
 	full = append(full, extraArgs...)
-	args := append([]string{"internal-check-exec", workdir}, full...)
+	args := append([]string{"internal-check-exec", GHTokenFlag, workdir}, full...)
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.WaitDelay = 5 * time.Second
 	stdout := &limitedBuffer{max: maxOutput, what: "stdout"}

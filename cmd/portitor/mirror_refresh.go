@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -50,6 +52,16 @@ func refreshDefaultBranch(bare string) error {
 	remote := s.UpstreamRemote
 	if remote == "" {
 		remote = "upstream"
+	}
+	// A repo provisioned without an upstream has nothing to refresh from; it is
+	// served as is. Same "not configured" test forwarding uses: exit 1 from
+	// `git config --get`.
+	if _, err := git.OutputHermetic(bare, "config", "--get", "remote."+remote+".url"); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			return nil
+		}
+		return fmt.Errorf("refresh %s: check %s remote: %w", name, remote, err)
 	}
 	timeout := s.ServeRefreshTimeoutOrDefault()
 

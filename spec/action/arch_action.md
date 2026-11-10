@@ -141,9 +141,8 @@ radius is compute.
 
 - **`checks --pr N`** returns, in one JSON response, per-check state (`name`,
   `status`, `conclusion`, `startedAt`, `completedAt`, `workflowName`), the
-  owning run id / job id (parsed gate-side from `detailsUrl` — callers never
-  parse URLs in shell), the run's `run_attempt` (from the run object; it is not
-  in `statusCheckRollup`), the check's resolved budget in seconds
+  owning run id / job id and the run's `run_attempt`, the check's resolved budget in
+  seconds
   (`checks.budgets` per-name, else the default — data for the caller's
   stuck-detection; deciding *when* to re-run stays client-side), plus
   `mergeStateStatus` and `headRefOid`. `fetch` stays the PR-conversation
@@ -184,11 +183,23 @@ other verb; the recommended policy grants `rerun` only to the landing identity
 (`identity_only_roles` constrains commit-signing trust, not API actions — no
 conflict).
 
+## Reading checks with a fine-grained PAT
+
+GitHub refuses the Checks API to fine-grained PATs, and `statusCheckRollup` reads check runs
+through it, so portitor never asks for it. A head's checks are read from the two sources a
+fine-grained PAT can read: the Actions jobs of the head's workflow runs (each job one check, its
+run, job and attempt ids taken directly from the Actions API) and the head's commit statuses (each
+context one check). Statuses and conclusions are upper-cased so both look alike. Check runs that
+other GitHub Apps post are visible only through the Checks API and are therefore not seen; a
+`required_checks` entry names an Actions job or a commit-status context. The gate's PAT needs
+Contents and Pull requests (read/write), Actions (read for `checks` and `logs`, write for `rerun`)
+and Commit statuses (read).
+
 ## Merge preconditions (re-derived, never trusted; review source configurable)
 
-`merge` re-derives every precondition from authoritative GitHub state in one query
-(`mergeStateStatus`, `statusCheckRollup`, `headRefName`, plus `reviewDecision` when configured)
-plus the local repo, and refuses with the full list of unmet conditions:
+`merge` re-derives every precondition from authoritative GitHub state — one query for
+`mergeStateStatus`, `headRefName`, `headRefOid` and `reviewDecision`, plus the head's checks when
+`required_checks` is set — and the local repo, and refuses with the full list of unmet conditions:
 
 - **review** — per the config's `merge_gate.review`, one of `github | none` (default `none` when
   the block or field is absent):
@@ -206,8 +217,8 @@ plus the local repo, and refuses with the full list of unmet conditions:
   inherits every GitHub branch rule including required conversation resolution). Portitor is a
   strict superset of GitHub's own rules, never a bypass.
 - **required checks green** — the config's `required_checks` list; each named check must appear
-  in `statusCheckRollup` with a successful conclusion. An empty list makes checks advisory
-  (deliberate: repos without CI yet).
+  among the head's checks with a successful conclusion. An empty list makes checks advisory
+  (deliberate: repos without CI yet) and skips reading checks at all.
 - **command predicates** — `merge_gate.checks`: named commands under the same hermetic execution
   contract as content-rule check commands (explicit argv from config, no shell, deadline,
   bounded output), run in the bare repo dir with the PR number and head SHA appended as the
@@ -262,8 +273,14 @@ merge/close are simply unavailable through portitor (a human lands out-of-band).
 ## Boundaries
 
 `internal/action` constructs all `gh` arguments and is the only place portitor shells to `gh`; a
-swappable `Runner` keeps it unit-testable. Deployment wiring lives in `deploy/entrypoint.sh`: it
-installs each agent/role key into `authorized_keys` with the `command="portitor shell <fp>"` forced
-wrapper (`restrict`ed), and gives portitor its GitHub credential from `GH_TOKEN` via `gh auth login`
-+ `gh auth setup-git` — one PAT serving both `gh pr` and `git push upstream`. Richer review payloads
+swappable `Runner` keeps it unit-testable. Deployment wiring lives in the gate's entrypoint (see
+spec/gate/arch_pre_receive.md): it installs each agent/role key into `authorized_keys` with the
+`command="portitor shell <fp>"` forced wrapper (`restrict`ed). portitor never logs in to GitHub. Its
+credential is the file `/run/secrets/gh_token`, which `portitor deploy` copies into the created
+container (never an env var, never an image layer), read per call: the default `Runner` sets
+`GH_TOKEN` on the `gh` child only, network `git` (`git push upstream`, the fetches) authenticates
+through the `portitor git-credential` helper, and `merge_gate.checks` predicates get `GH_TOKEN`
+through the check trampoline. One PAT serves all three. An empty file fails the call loudly; with
+no file at all — `reconcile` or `pr` run on an operator machine — `gh` and `git` keep their
+ambient authentication. Richer review payloads
 (inline review comments) extend the `pr review` action without changing this model.

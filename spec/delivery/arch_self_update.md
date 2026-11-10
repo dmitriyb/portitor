@@ -10,6 +10,23 @@ The CLI front-end (`portitor upgrade`) is specified by the cli module's UpgradeC
 
 The resolve / download / `ssh-keygen -Y verify` (against the embedded `SIGNING_PUBKEY`, `-n file` namespace) logic is shared and untouched between the two modes; upgrade mode adds decisions around it, not a second verifier. Fail-closed is preserved end to end: a failed download or a signature that does not verify exits non-zero having changed nothing on disk.
 
+## The gate binary pair
+
+For tool `portitor`, both modes also handle `portitor-gate`: the linux build for the host's arch
+that `portitor deploy` bakes into the gate image. The script fetches the release's
+`portitor_<version>_linux_<arch>.tar.gz` with its `.sig`, verifies it exactly like the host
+archive, and installs its binary as `portitor-gate` beside the tool (on a Linux host the two
+archives are the same one, fetched once). Upgrade mode takes `--gate-target <path>` (default:
+`portitor-gate` beside `--target`) and `--gate-current <version>`, which `portitor upgrade` reads
+from the gate binary's Go build info (its module version, passed only when it is a release
+version), since a linux binary cannot be executed on a darwin host. Without `--gate-current` the
+script probes `<gate> version` on a linux host and, on any other, treats the gate as needing
+repair. The
+pair is up to date only when both are at the target version; otherwise both are replaced — a
+missing or mismatched `portitor-gate` is repaired even when `portitor` itself is current. Both
+files go through the same stage, move-aside and rename, `--rollback` restores both `.bak` files,
+and a failure while replacing either restores both. Tool `portitor-mcp` has no gate binary.
+
 ## Safe self-replace
 
 Overwriting a running binary in place hits `ETXTBSY` on Linux; a `rename(2)` over it is safe — the running process keeps its inode, and the next invocation gets the new file. So upgrade mode never writes over the target: it stages the verified new binary in the target's own directory (same filesystem, so the final swap is an atomic rename), then `mv`s the running binary aside to `<target>.bak` and `mv`s the new one into place. It never uses `install`/`cp` over the running file. The directory-writability requirement of rename is what the RequireRoot probe checks.

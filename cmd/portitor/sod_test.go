@@ -3,7 +3,7 @@
 // requesterSignedPR/requesterSignedHead helpers it pinned — is removed (see
 // spec/proposals/2026-08-05-transparent-approve.md): reviewer-≠-author
 // integrity now lives in GitHub branch protection (separated accounts) or
-// the push-time content_rules that already gate a bead-close to the
+// the push-time content_rules that already gate an approval to the
 // reviewer key (single-account git-content). The remaining tests here
 // (bakedHookConfig / init-repo registry defaults) are unrelated to SoD and
 // stay; mustRun is also used by e2e_test.go.
