@@ -20,13 +20,13 @@ func TestRunPredicateMet(t *testing.T) {
 func TestRunPredicateUnmet(t *testing.T) {
 	requireSh(t)
 	dir := t.TempDir()
-	s := script(t, "echo bead not closed >&2\nexit 3\n")
+	s := script(t, "echo change not approved >&2\nexit 3\n")
 	err := RunPredicate([]string{s}, dir)
 	var ue *PredicateUnmetError
 	if !errors.As(err, &ue) {
 		t.Fatalf("want *PredicateUnmetError, got %v", err)
 	}
-	if ue.ExitCode != 3 || !strings.Contains(ue.Excerpt, "bead not closed") {
+	if ue.ExitCode != 3 || !strings.Contains(ue.Excerpt, "change not approved") {
 		t.Fatalf("unmet = %+v", ue)
 	}
 }

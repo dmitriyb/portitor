@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,6 +236,7 @@ type gateInstance struct {
 	port       int
 	knownHosts string
 	pinFile    string
+	images     *[]string // every image a deploy of this gate built, removed at cleanup
 }
 
 // standUpGate deploys a gate from this tree through the real `portitor deploy`
@@ -242,20 +244,23 @@ type gateInstance struct {
 // directory baked in, the roles' public keys installed, the PAT delivered as the
 // copied-in credential file, the SSH port published on 127.0.0.1. The PAT goes
 // straight to the deployer, never through an env var a docker child could
-// inherit. Every resource is torn down via t.Cleanup, even on failure.
-func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string) *gateInstance {
+// inherit. packages are the extra nixpkgs tools the scenario's policy calls,
+// declared as an operator would. Every resource is torn down via t.Cleanup,
+// even on failure.
+func standUpGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string, packages ...string) *gateInstance {
 	t.Helper()
-	gi, _ := deployGate(t, cfgDir, roles, pat, nil)
+	gi, _ := deployGate(t, cfgDir, roles, pat, nil, packages...)
 	return gi
 }
 
 // deployGate is standUpGate returning the deploy config path as well; given
-// prev, it re-deploys that gate (same name, volumes and pin).
-func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string, prev *gateInstance) (*gateInstance, string) {
+// prev, it re-deploys that gate (same name, volumes, pin and cleanup).
+func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat string, prev *gateInstance, packages ...string) (*gateInstance, string) {
 	t.Helper()
 	name, pinFile := "", ""
+	images := &[]string{}
 	if prev != nil {
-		name, pinFile = prev.name, prev.pinFile
+		name, pinFile, images = prev.name, prev.pinFile, prev.images
 	}
 	gate := gateBinary(t)
 	work := filepath.Join(t.TempDir(), "deploy")
@@ -288,6 +293,7 @@ func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat strin
 		"token_command":   []string{"unused-the-test-hands-the-token-over"},
 		"host_key_file":   pinFile,
 		"gate_bin":        gate,
+		"image":           map[string]any{"packages": packages},
 	}
 	b, err := json.Marshal(cfg)
 	if err != nil {
@@ -298,9 +304,14 @@ func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat strin
 		t.Fatal(err)
 	}
 	if fresh {
+		// One cleanup, in dependency order: an image cannot be removed while
+		// the container using it exists.
 		t.Cleanup(func() {
 			tryDocker(t, "rm", "-f", name)
 			tryDocker(t, "volume", "rm", name+"-repos", name+"-hostkey")
+			for _, img := range *images {
+				tryDocker(t, "rmi", img)
+			}
 		})
 	}
 	c, err := deploy.LoadConfig(cfgPath)
@@ -325,8 +336,10 @@ func deployGate(t *testing.T, cfgDir string, roles map[string]roleKey, pat strin
 		logs, _ := dockerOut("logs", name)
 		t.Fatalf("portitor deploy: %v\ngate logs:\n%s", err, logs)
 	}
-	t.Cleanup(func() { tryDocker(t, "rmi", res.Image) })
-	gi := &gateInstance{name: name, volume: name + "-repos", image: res.Image, pinFile: pinFile}
+	if !slices.Contains(*images, res.Image) {
+		*images = append(*images, res.Image)
+	}
+	gi := &gateInstance{name: name, volume: name + "-repos", image: res.Image, pinFile: pinFile, images: images}
 	p, ok := gi.tryResolvePort()
 	if !ok || !sshBannerReady(p) {
 		t.Fatalf("deployed gate %s serves no SSH banner on its published port", name)
@@ -399,8 +412,9 @@ func (gi *gateInstance) pinHostKey(t *testing.T, pinFile string) {
 }
 
 // addRepo asserts the gate provisioned repo at boot from its config (the
-// entrypoint's `add-repo --ensure`); running it again must be a no-op.
-func (gi *gateInstance) addRepo(t *testing.T, repo, _ string) {
+// entrypoint's `add-repo --ensure`, upstream from upstream_slug); running it
+// again must be a no-op.
+func (gi *gateInstance) addRepo(t *testing.T, repo string) {
 	t.Helper()
 	runDocker(t, "exec", "-u", "git", gi.name, "portitor", "add-repo", "--ensure", "--repo", repo)
 }

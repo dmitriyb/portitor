@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -78,10 +79,10 @@ func parsePRNumber(t *testing.T, pushOutput string) int {
 
 // TestGateAccept_SingleAccountMergeModel drives scenario 3 of the matrix
 // (spec/proposals/2026-08-05-gate-acceptance-suite.md): merge_gate.review
-// "none" + merge_gate.checks [bead-closed] + content_rules gating a
-// bead-close to the reviewer role. It also demonstrates scenario 4
+// "none" + merge_gate.checks [approved] + content_rules gating the
+// approval of a change to the reviewer role. It also demonstrates scenario 4
 // (separation-of-duties is gone) as a direct side effect of the same flow:
-// the reviewer's signed bead-close commit does not block the merger (who
+// the reviewer's signed approval commit does not block the merger (who
 // signs nothing) from merging — there is no hardcoded requester-signed check
 // left anywhere in this path (2026-08-05-transparent-approve §3).
 //
@@ -89,11 +90,11 @@ func parsePRNumber(t *testing.T, pushOutput string) int {
 // `pr merge` exit code) and the resulting real GitHub state:
 //  1. implementer pushes a feature branch -> gate accepts, forwards
 //     upstream, auto-opens a PR.
-//  2. merger attempts `pr merge` while the bead is open -> refused
-//     (merge_gate check "bead-closed" unmet).
-//  3. implementer (non-reviewer) attempts the bead-close -> REJECTED at
-//     push (content_rules semantic rule "bead-close-reviewer-only").
-//  4. reviewer signs the SAME bead-close -> accepted at push.
+//  2. merger attempts `pr merge` while the change is not approved -> refused
+//     (merge_gate check "approved" unmet).
+//  3. implementer (non-reviewer) attempts the approval -> REJECTED at
+//     push (content_rules semantic rule "approve-reviewer-only").
+//  4. reviewer signs the SAME approval -> accepted at push.
 //  5. merger's `pr merge` now succeeds and lands on GitHub.
 func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 	env := setupGateAccept(t)
@@ -115,8 +116,9 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
 	chmodTreePrivate(t, cfgDir) // owner-only, like operator tooling leaves it: only the bake's mode normalization lets git read it
 
-	gi := standUpGate(t, cfgDir, roles, env.PAT)
-	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
+	// approvedScript calls grep, which the gate image's fixed part does not ship.
+	gi := standUpGate(t, cfgDir, roles, env.PAT, "gnugrep")
+	gi.addRepo(t, repoName)
 
 	// ---- step 1: implementer pushes a feature branch ----
 	implDir := gi.cloneAsRole(t, roles["implementer"], repoName)
@@ -162,41 +164,43 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 		t.Fatalf("PR #%d body should be overwritten by describe; got %q, want %q", pr, prBody.Body, newBody)
 	}
 
-	// ---- step 2: merge refused while the bead is open ----
-	waitMergeClean(t, env.GH.Repo, pr) // so the refusal is the bead-closed check, not a transient UNKNOWN merge state
+	// ---- step 2: merge refused while the change is not approved ----
+	waitMergeClean(t, env.GH.Repo, pr) // so the refusal is the approved check, not a transient UNKNOWN merge state
 	_, mergeStderr, err := gi.runPRAs(t, roles["merger"], "", "merge", "--repo", repoName, "--pr", strconv.Itoa(pr))
+	logMergeViews(t, gi, env.GH.Repo, pr)
 	if err == nil {
-		t.Fatalf("merge should be refused while the bead is open; stderr:\n%s", mergeStderr)
+		t.Fatalf("merge should be refused while the change is not approved; stderr:\n%s", mergeStderr)
 	}
-	if !strings.Contains(mergeStderr, mergeCheckBeadClosed) {
-		t.Errorf("refusal should name the unmet %q check; stderr:\n%s", mergeCheckBeadClosed, mergeStderr)
+	if !strings.Contains(mergeStderr, mergeCheckApproved) {
+		t.Errorf("refusal should name the unmet %q check; stderr:\n%s", mergeCheckApproved, mergeStderr)
 	}
 
-	// ---- step 3: a non-reviewer bead-close is rejected at push ----
-	closeBead(t, implDir)
+	// ---- step 3: a non-reviewer approval is rejected at push ----
+	approveChange(t, implDir)
 	out, err = gi.pushAsRole(t, roles["implementer"], implDir, "feature/gateaccept")
 	if err == nil {
-		t.Fatalf("a non-reviewer (implementer) bead-close should be rejected at push:\n%s", out)
+		t.Fatalf("a non-reviewer (implementer) approval should be rejected at push:\n%s", out)
 	}
-	if !strings.Contains(out, semanticRuleBeadClose) {
-		t.Errorf("rejection should name the %q rule; push output:\n%s", semanticRuleBeadClose, out)
+	if !strings.Contains(out, semanticRuleApprove) {
+		t.Errorf("rejection should name the %q rule; push output:\n%s", semanticRuleApprove, out)
 	}
 
-	// ---- step 4: a reviewer-signed bead-close is accepted ----
+	// ---- step 4: a reviewer-signed approval is accepted ----
 	revDir := gi.cloneAsRole(t, roles["reviewer"], repoName)
 	mustRun(t, "git", "-C", revDir, "checkout", "-q", "feature/gateaccept")
 	gitConfigSigning(t, revDir, roles["reviewer"], "reviewer@gateaccept.test")
-	closeBead(t, revDir)
+	approveChange(t, revDir)
 	out, err = gi.pushAsRole(t, roles["reviewer"], revDir, "feature/gateaccept")
 	if err != nil {
-		t.Fatalf("a reviewer-signed bead-close should be accepted:\n%s", out)
+		t.Fatalf("a reviewer-signed approval should be accepted:\n%s", out)
 	}
 
 	// ---- step 5: merge now succeeds (the merger signed nothing — scenario 4) ----
 	waitMergeClean(t, env.GH.Repo, pr) // step 4's push re-triggered GitHub's async mergeability compute; wait for CLEAN
 	mergeOut, mergeErrOut, err := gi.runPRAs(t, roles["merger"], "", "merge", "--repo", repoName, "--pr", strconv.Itoa(pr))
 	if err != nil {
-		t.Fatalf("merge should succeed once the bead is reviewer-closed: %v\nstdout:\n%s\nstderr:\n%s", err, mergeOut, mergeErrOut)
+		logMergeViews(t, gi, env.GH.Repo, pr)
+		t.Fatalf("merge should succeed once the reviewer approved the change: %v\nstdout:\n%s\nstderr:\n%s", err, mergeOut, mergeErrOut)
 	}
 
 	// ---- assert the resulting real GitHub state ----
@@ -220,7 +224,7 @@ func TestGateAccept_SingleAccountMergeModel(t *testing.T) {
 // default applies) — the behavior under test (force-updating the mirror's
 // default branch before serving git-upload-pack) runs in the SSH shell
 // dispatcher itself, ahead of any push-time or merge-time machinery.
-func mirrorRefreshSettings(roles map[string]roleKey, allowedSignersPath string) config.Settings {
+func mirrorRefreshSettings(roles map[string]roleKey, upstreamSlug, allowedSignersPath string) config.Settings {
 	rolesMap := make(map[string]string, len(roles))
 	for _, rk := range roles {
 		rolesMap[rk.fingerprint] = rk.role
@@ -232,6 +236,7 @@ func mirrorRefreshSettings(roles map[string]roleKey, allowedSignersPath string) 
 			AllowedSigners: allowedSignersPath,
 			Roles:          rolesMap,
 		},
+		UpstreamSlug: upstreamSlug,
 	}
 }
 
@@ -268,12 +273,12 @@ func TestGateAccept_MirrorRefreshOnServe(t *testing.T) {
 	writeAllowedSigners(t, filepath.Join(cfgDir, "allowed_signers"), roles["reader"])
 
 	const repoName = "gateaccept-mirror-refresh"
-	settings := mirrorRefreshSettings(roles, "/etc/portitor/allowed_signers")
+	settings := mirrorRefreshSettings(roles, env.GH.Repo, "/etc/portitor/allowed_signers")
 	writeJSON(t, filepath.Join(cfgDir, "repos.d", repoName+".json"), settings)
 	chmodTreePrivate(t, cfgDir)
 
 	gi := standUpGate(t, cfgDir, roles, env.PAT)
-	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
+	gi.addRepo(t, repoName)
 
 	// ---- step 1: a clone through the gate shows the seed state ----
 	dir1 := gi.cloneAsRole(t, roles["reader"], repoName)
@@ -457,7 +462,7 @@ func TestGateAccept_RerunPath(t *testing.T) {
 	chmodTreePrivate(t, cfgDir)
 
 	gi := standUpGate(t, cfgDir, roles, env.PAT)
-	gi.addRepo(t, repoName, "https://github.com/"+env.GH.Repo+".git")
+	gi.addRepo(t, repoName)
 
 	// ---- step 1: push a feature branch carrying the pass+fail workflow ----
 	implDir := gi.cloneAsRole(t, roles["implementer"], repoName)
@@ -634,14 +639,14 @@ func TestGateAccept_ConfigBootRejection(t *testing.T) {
 // TestGateAccept_SeparationOfDutiesGone is scenario 4, as a STANDALONE
 // scenario (TestGateAccept_SingleAccountMergeModel above already
 // demonstrates its core assertion as a side effect: the reviewer's signed
-// bead-close does not block the merger, who signs nothing, from merging —
+// approval does not block the merger, who signs nothing, from merging —
 // there is no hardcoded requester-signed check left in either the approve or
 // merge path). A dedicated scenario would additionally assert that a
 // reviewer who ALSO authored the feature branch's other commits is still not
 // blocked — i.e. probe the specific "same key both requests and reviews"
 // shape the old separation-of-duties check used to refuse.
 func TestGateAccept_SeparationOfDutiesGone(t *testing.T) {
-	t.Skip("TODO(scenario 4 — separation-of-duties gone): reuse scenario 3's harness with the reviewer key ALSO signing an earlier commit on the same feature branch (the shape the old requester-signed check refused), and assert merge still succeeds — TestGateAccept_SingleAccountMergeModel already covers the simpler reviewer-signed-bead-close/merger-merges case.")
+	t.Skip("TODO(scenario 4 — separation-of-duties gone): reuse scenario 3's harness with the reviewer key ALSO signing an earlier commit on the same feature branch (the shape the old requester-signed check refused), and assert merge still succeeds — TestGateAccept_SingleAccountMergeModel already covers the simpler reviewer-signed-approval/merger-merges case.")
 }
 
 // TestGateAccept_GateThreadAutoResolveByAuthor is scenario 5: after a gate
@@ -662,4 +667,31 @@ func TestGateAccept_GateThreadAutoResolveByAuthor(t *testing.T) {
 // the pin).
 func TestGateAccept_HeadPinning(t *testing.T) {
 	t.Skip("TODO(scenario 6 — head-pinning): open a PR that already meets every merge_gate precondition, race a second signed push onto the same branch between the merge command's own precondition read and its `gh pr merge --match-head-commit` call (e.g. a config check predicate that sleeps), and assert the merge is refused GitHub-side (head moved) rather than silently landing the stale head.")
+}
+
+// mergeViewFields is the query the gate's `pr merge` makes
+// (internal/action GH.FetchMergeState).
+const mergeViewFields = "reviewDecision,mergeStateStatus,headRefName,headRefOid,statusCheckRollup"
+
+// logMergeViews records what GitHub answers about pr from the runner and from
+// inside the gate — the gate's own query and the bare mergeStateStatus one, with
+// both gh versions — so a merge state the test and the gate disagree on can be
+// traced to the query, the client, or the timing.
+func logMergeViews(t *testing.T, gi *gateInstance, repo string, pr int) {
+	t.Helper()
+	n := strconv.Itoa(pr)
+	if v, err := exec.Command("gh", "--version").CombinedOutput(); err == nil {
+		t.Logf("runner %s", strings.SplitN(string(v), "\n", 2)[0])
+	}
+	for _, fields := range []string{"mergeStateStatus", mergeViewFields} {
+		out, err := ghAPIOK("pr", "view", n, "--repo", repo, "--json", fields)
+		t.Logf("runner view %s (err=%v):\n%s", fields, err, out)
+	}
+	v, err := dockerOut("exec", "-u", "git", gi.name, "gh", "--version")
+	t.Logf("gate %s (err=%v)", strings.SplitN(string(v), "\n", 2)[0], err)
+	for _, fields := range []string{"mergeStateStatus", mergeViewFields} {
+		out, err := dockerOut("exec", "-u", "git", gi.name, "sh", "-c",
+			`GH_TOKEN=$(cat /run/secrets/gh_token) exec gh pr view "$1" --repo "$2" --json "$3"`, "sh", n, repo, fields)
+		t.Logf("gate view %s (err=%v):\n%s", fields, err, out)
+	}
 }
