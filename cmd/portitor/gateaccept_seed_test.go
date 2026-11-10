@@ -4,18 +4,18 @@ package main
 
 // Seed/reset for the disposable GitHub repo the gate acceptance suite drives
 // (PORTITOR_ACCEPT_REPO), plus the scenario 3 per-repo config builder.
-// The repo starts genuinely empty (spec/proposals/2026-08-05-
-// gate-acceptance-suite.md): ensureSeed creates its pristine state once (an
-// initial commit + the seed tag); resetDisposableRepo restores
-// that state before every scenario (closes open PRs, deletes non-default
+// The repo's pristine state is prepared once by the operator from
+// testdata/acceptance-seed (scripts/prepare-acceptance-seed.sh) and tagged
+// with testdata/acceptance-seed.tag: it carries a workflow file, which the
+// suite's own PAT is deliberately unable to push. verifySeed proves the tag
+// still holds exactly that tree; resetDisposableRepo restores that state
+// before every scenario (closes open PRs, deletes non-default
 // branches, force-pushes the default branch back to the tag), scoped to the
 // forge side only (no gate mirror persists across acceptance tests — each
 // scenario stands up its own fresh gate).
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -35,21 +35,22 @@ import (
 
 const (
 	probeFile     = "gateaccept-probe.txt"
-	probeContent  = "gateaccept seed\n"
 	approvalsFile = "approvals.jsonl"
 	approvalID    = "gateaccept-change-1"
+	seedDir       = "testdata/acceptance-seed"
 
 	structRuleApprovalsReviewerOnly = "approvals-file-reviewer-only"
 	semanticRuleApprove             = "approve-reviewer-only"
 	mergeCheckApproved              = "approved"
 )
 
-// seedTag names the disposable repo's pristine state after the seed content
-// itself, so a change to the fixture seeds a fresh state instead of resetting
-// to a stale one.
+// seedTag is the tag the operator put on the prepared seed.
 var seedTag = func() string {
-	h := sha256.Sum256([]byte(probeContent + seedApprovalJSONL("pending")))
-	return "gateaccept-seed-" + hex.EncodeToString(h[:6])
+	b, err := os.ReadFile("testdata/acceptance-seed.tag")
+	if err != nil {
+		panic(err) // the fixture is part of the tree; its absence is a broken checkout
+	}
+	return strings.TrimSpace(string(b))
 }()
 
 // jsonlWrapScript is the content_rules semantic check command for the
@@ -81,8 +82,8 @@ func seedApprovalJSONL(state string) string {
 	return string(b) + "\n"
 }
 
-// ---- gh api helpers (JSON-parsing; distinct from realgh_test.go's rawGH,
-// which merges stdout+stderr and is fine for non-parsed calls) ----
+// ---- gh api helpers (JSON-parsing; distinct from rawGH, which merges
+// stdout+stderr and is fine for non-parsed calls) ----
 
 // ghAPI runs `gh <args...>`, capturing stdout/stderr separately, and fails
 // the test loudly on error — for calls whose JSON stdout this file parses.
@@ -95,8 +96,8 @@ func ghAPI(t *testing.T, args ...string) []byte {
 	return out
 }
 
-// ghAPIOK is ghAPI without the test-fatal: for existence probes (the seed
-// tag may legitimately not exist yet) and best-effort cleanup calls.
+// ghAPIOK is ghAPI without the test-fatal: for existence probes whose failure
+// the caller reports itself, and best-effort cleanup calls.
 func ghAPIOK(args ...string) ([]byte, error) {
 	cmd := exec.Command("gh", args...)
 	cmd.Env = os.Environ()
@@ -115,47 +116,65 @@ func ghAPIOK(args ...string) ([]byte, error) {
 // gate correctly refuses a non-CLEAN state, so a merge issued in that window
 // fails spuriously. Polling this same field (not REST .mergeable, which can
 // settle independently — GraphQL mergeStateStatus was still UNKNOWN after REST
-// .mergeable had gone non-null) is what avoids racing that compute. A
-// production merge after a review has natural delay; this tight test does not.
-func waitMergeClean(t *testing.T, repo string, pr int) {
+// .mergeable had gone non-null) is what avoids racing that compute. It waits
+// for CLEAN of head specifically: right after a push GitHub can still report
+// the previous head's CLEAN, and a merge issued then meets the new head's
+// UNKNOWN. A production merge after a review has natural delay; this tight
+// test does not.
+func waitMergeClean(t *testing.T, repo string, pr int, head string) {
 	t.Helper()
 	deadline := time.Now().Add(45 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := ghAPIOK("pr", "view", strconv.Itoa(pr), "--repo", repo, "--json", "mergeStateStatus", "--jq", ".mergeStateStatus")
+		out, err := ghAPIOK("pr", "view", strconv.Itoa(pr), "--repo", repo, "--json", "mergeStateStatus,headRefOid",
+			"--jq", `.headRefOid + " " + .mergeStateStatus`)
 		last = strings.TrimSpace(string(out))
-		if err == nil && last == "CLEAN" {
+		if err == nil && last == head+" CLEAN" {
 			return
 		}
 		time.Sleep(1 * time.Second)
 	}
-	t.Fatalf("PR #%d mergeStateStatus never reached CLEAN within 45s (last: %q)", pr, last)
+	t.Fatalf("PR #%d never reached CLEAN at head %s within 45s (last: %q)", pr, head, last)
 }
 
-// ensureSeed makes the disposable repo's seed tag exist, creating it (one
-// commit whose tree is exactly the probe file and the one-record approvals
-// fixture, then the tag) the first time this suite runs against the repo with
-// this fixture. Idempotent — a later run finds the tag and returns.
-func ensureSeed(t *testing.T, env realGHEnv) {
+// verifySeed fails unless the disposable repo's seed tag exists and its tree is
+// exactly testdata/acceptance-seed, path for path and byte for byte — a stale
+// or hand-edited seed would otherwise make every scenario test the wrong
+// starting state.
+func verifySeed(t *testing.T, env realGHEnv) {
 	t.Helper()
-	if _, err := ghAPIOK("api", fmt.Sprintf("repos/%s/git/ref/tags/%s", env.GH.Repo, seedTag)); err == nil {
-		return // already seeded
+	fix := "prepare it: clone the disposable repo, run scripts/prepare-acceptance-seed.sh <clone>, then push main and " + seedTag + " as it prints"
+	if _, err := ghAPIOK("api", fmt.Sprintf("repos/%s/git/ref/tags/%s", env.GH.Repo, seedTag)); err != nil {
+		t.Fatalf("the disposable repo %s has no seed tag %s: %v\n%s", env.GH.Repo, seedTag, err, fix)
 	}
-	dir := cloneRepo(t, env) // realgh_test.go: PAT-authenticated clone, signing disabled
-	runGit(t, dir, "checkout", "-B", "main")
-	// An earlier fixture's files must not survive into this seed's tree.
-	runGit(t, dir, "rm", "-rq", "--ignore-unmatch", ".")
-	if err := os.WriteFile(filepath.Join(dir, approvalsFile), []byte(seedApprovalJSONL("pending")), 0o644); err != nil {
-		t.Fatal(err)
+	want := map[string][]byte{}
+	err := filepath.WalkDir(seedDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(seedDir, p)
+		if err != nil {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		want[filepath.ToSlash(rel)] = b
+		return err
+	})
+	if err != nil {
+		t.Fatalf("read %s: %v", seedDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, probeFile), []byte(probeContent), 0o644); err != nil {
-		t.Fatal(err)
+	dir := cloneRepo(t, env)
+	runGit(t, dir, "fetch", "-q", "origin", "tag", seedTag)
+	got := strings.Split(strings.TrimSuffix(runGit(t, dir, "ls-tree", "-r", "-z", "--name-only", seedTag), "\x00"), "\x00")
+	if len(got) != len(want) {
+		t.Fatalf("seed tag %s holds %v, want exactly the files of %s\n%s", seedTag, got, seedDir, fix)
 	}
-	runGit(t, dir, "add", "-A")
-	runGit(t, dir, "commit", "-q", "-m", "gateaccept: seed")
-	runGit(t, dir, "push", "-q", "-u", "origin", "main")
-	runGit(t, dir, "tag", seedTag)
-	runGit(t, dir, "push", "-q", "origin", seedTag)
+	for _, path := range got {
+		w, ok := want[path]
+		if !ok || runGit(t, dir, "show", seedTag+":"+path) != string(w) {
+			t.Fatalf("seed tag %s: %s differs from %s\n%s", seedTag, path, seedDir, fix)
+		}
+	}
 }
 
 type ghPR struct {
@@ -180,12 +199,12 @@ type ghTagObject struct {
 }
 
 // resetDisposableRepo restores the forge side of the disposable repo to its
-// pristine seed state before every scenario (the faber-e2e reset shape):
-// seed if needed, close every open PR, delete every non-default branch, then
-// force the default branch back to the seed tag's commit.
+// pristine seed state before every scenario: verify the seed, close every open
+// PR, delete every non-default branch, then force the default branch back to
+// the seed tag's commit.
 func resetDisposableRepo(t *testing.T, env realGHEnv) {
 	t.Helper()
-	ensureSeed(t, env)
+	verifySeed(t, env)
 
 	var prs []ghPR
 	if err := json.Unmarshal(ghAPI(t, "api", fmt.Sprintf("repos/%s/pulls?state=open&per_page=100", env.GH.Repo)), &prs); err != nil {

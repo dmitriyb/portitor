@@ -1,9 +1,10 @@
 name: Acceptance
 
 # The real-GitHub suite against one disposable repo. Its PAT is limited to
-# Contents and Pull requests on that one private repo (Actions disabled there)
-# and reaches only the test step's env. This assumes people push portitor's
-# branches; once agents do, freeze .github/** for them in the gate policy first.
+# Contents, Pull requests and Actions on that one private repo, without the
+# Workflows permission, and reaches only the test step's env. This assumes
+# people push portitor's branches; once agents do, freeze .github/** for them in
+# the gate policy first.
 on:
   pull_request:
     paths-ignore:

@@ -45,6 +45,10 @@ a dummy PAT, and a repo config without `upstream_slug`, so nothing reaches GitHu
 - With ephemeral role keys: a signed push to a feature branch passes `pre-receive`; a fetch
   (`git ls-remote`) through the forced command sees it, before and after a re-deploy.
 - A second deploy with a changed config replaces the gate and keeps the host key.
+- Boot rejection: a container created from the deployed image without the credential file,
+  and one given a repo config that does not validate, each exit non-zero with the entrypoint's
+  refusal and never start sshd. They are created from the image directly, because `deploy`'s
+  own validation would refuse the broken config before any container exists.
 - In CI the job runs the daemon with `userns-remap`; when `PORTITOR_REQUIRE_USERNS=1` and
   `docker info` reports no user namespace, the test fails instead of skipping.
 
@@ -52,9 +56,21 @@ a dummy PAT, and a repo config without `upstream_slug`, so nothing reaches GitHu
 
 The real-GitHub suite (`gate_accept_test.go`) stands its gate up through the same builder. Its
 PAT and repo slug come from `PORTITOR_ACCEPT_PAT` and `PORTITOR_ACCEPT_REPO`. When `CI` is set
-and either is missing, the suite fails; outside CI it skips. The Actions-proxy scenario
-(`RerunPath`) pushes a workflow and waits for Actions runs, which CI's PAT and repo deliberately
-cannot do; it runs only with `PORTITOR_ACCEPT_ACTIONS=1`, a PAT with the Workflows permission and
-Actions enabled on the disposable repo. The boot-rejection scenario is still a stub; when filled
-in, it creates a container from the built image directly, because `deploy`'s own validation
-would refuse first.
+and either is missing, the suite fails; outside CI it skips. Every scenario resets the repo to
+the operator-prepared seed (`testdata/acceptance-seed`, tag `testdata/acceptance-seed.tag`) and
+first verifies the tag holds exactly that tree. No scenario is skipped:
+
+- the single-account merge model: an approval recorded as repo content by the reviewer
+  role, enforced at push, gating the merge, landed by a merger who signs nothing;
+- mirror refresh on serve: a clone through the gate reflects upstream's advanced default branch;
+- the Actions proxy: `pr checks`, `pr logs` and a capped, role-gated `pr rerun` on the seed's
+  pass+fail workflow, confirmed against GitHub;
+- review passthrough: a comment review lands, GitHub's refusal of a self-approval is forwarded
+  verbatim;
+- gate threads: a thread raised through the gate is resolved by `resolve --gate-threads`;
+- the PAT bound: GitHub refuses the acceptance PAT's push of a new workflow.
+
+Not covered here: that `resolve --gate-threads` leaves a thread by another author alone needs a
+second GitHub account (`GateAuthoredThreads` is unit-tested); the head-pin race on merge is not
+reproducible against GitHub deterministically (`--match-head-commit` is unit-tested in
+`internal/action`).

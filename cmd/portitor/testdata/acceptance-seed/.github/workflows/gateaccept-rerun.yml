@@ -1,0 +1,18 @@
+# The Actions-proxy acceptance scenario's CI: one passing and one deliberately
+# failing job, so the run completes red without being all-failed. It runs only
+# on that scenario's branch, so no other scenario's PR ever carries checks.
+name: gateaccept-rerun
+on:
+  push:
+    branches: [feature/gateaccept-rerun]
+jobs:
+  pass:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gateaccept pass"
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          for i in $(seq 1 50); do echo "gateaccept intentional failure line $i"; done
+          exit 1

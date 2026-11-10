@@ -58,9 +58,12 @@ Three more problems surface on the way:
     - **Acceptance**, against real GitHub: CI only, on pull requests and on `main`. A missing
       secret fails the run in CI.
 
-    The acceptance PAT reaches the test step's env only. It is limited to Contents and Pull
-    requests on one private disposable repo with Actions disabled. This replaces "user-run
-    only, never CI" from `2026-08-05-gate-acceptance-suite.md`.
+    The acceptance PAT reaches the test step's env only. It is limited to Contents, Pull
+    requests and Actions on one private disposable repo, with no Workflows permission: it can
+    run the workflows the repo already has, never add one, and a test proves GitHub refuses
+    it. The repo's seed, workflow included, is prepared once by the operator. No acceptance
+    scenario is skipped in CI. This replaces "user-run only, never CI" from
+    `2026-08-05-gate-acceptance-suite.md`.
 
     This assumes people push portitor's branches. Once agents do, a policy that freezes
     `.github/**` for them (as spexmachina's does) is required first.

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const dockerTierPAT = "ghp_docker_tier_dummy_token"
@@ -164,4 +165,87 @@ func keyOf(line string) string {
 		return ""
 	}
 	return f[1] + " " + f[2]
+}
+
+// TestDockerTierBootRejection proves the entrypoint refuses to start — exits
+// non-zero, never reaching sshd — on a gate with no credential file and on a
+// repo config that does not validate. The containers are created from a
+// deployed gate's image directly, because deploy's own validation would refuse
+// the broken config before any container exists.
+func TestDockerTierBootRejection(t *testing.T) {
+	requireDockerTier(t)
+	tmp := t.TempDir()
+	roles := genRoleKeys(t, filepath.Join(tmp, "keys"), "implementer")
+	cfgDir := filepath.Join(tmp, "gate-config")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "repos.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAllowedSigners(t, filepath.Join(cfgDir, "allowed_signers"), roles["implementer"])
+	writeRepoJSON(t, cfgDir, "dockertier", map[string]any{
+		"format_version":  1,
+		"default_branch":  "main",
+		"allowed_signers": "/etc/portitor/allowed_signers",
+		"roles":           map[string]string{roles["implementer"].fingerprint: "implementer"},
+	})
+	gi, _ := deployGate(t, cfgDir, roles, dockerTierPAT, nil)
+
+	tokenFile := filepath.Join(tmp, "gh_token")
+	if err := os.WriteFile(tokenFile, []byte(dockerTierPAT), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(tmp, "broken.json")
+	// Valid in every respect but the retired reviews_log key, which strict
+	// decode refuses: the refusal must be that key's, nothing else's.
+	broken, err := json.Marshal(map[string]any{
+		"format_version":  1,
+		"default_branch":  "main",
+		"allowed_signers": "/etc/portitor/allowed_signers",
+		"roles":           map[string]string{roles["implementer"].fingerprint: "implementer"},
+		"reviews_log":     "x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(invalid, broken, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		setup func(id string)
+		says  string
+		cause string
+	}{
+		{"no credential file", func(string) {}, "gh_token is missing or empty", ""},
+		{"invalid repo config", func(id string) {
+			runDocker(t, "cp", tokenFile, id+":/run/secrets/gh_token")
+			runDocker(t, "cp", invalid, id+":/etc/portitor/repos.d/broken.json")
+		}, "broken.json is invalid", "reviews_log"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			id := strings.TrimSpace(runDocker(t, "create", gi.image))
+			t.Cleanup(func() { tryDocker(t, "rm", "-f", id) })
+			c.setup(id)
+			runDocker(t, "start", id)
+			deadline := time.Now().Add(time.Minute)
+			state := ""
+			for time.Now().Before(deadline) {
+				state = strings.TrimSpace(runDocker(t, "inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", id))
+				if strings.HasPrefix(state, "exited ") {
+					break
+				}
+				time.Sleep(300 * time.Millisecond)
+			}
+			logs, _ := dockerOut("logs", id)
+			if !strings.HasPrefix(state, "exited ") || state == "exited 0" {
+				t.Fatalf("the gate should refuse to start, got state %q; logs:\n%s", state, logs)
+			}
+			if !strings.Contains(string(logs), "refusing to start") || !strings.Contains(string(logs), c.says) || !strings.Contains(string(logs), c.cause) {
+				t.Fatalf("the refusal should say %q (cause %q); logs:\n%s", c.says, c.cause, logs)
+			}
+			if strings.Contains(string(logs), "Server listening") {
+				t.Fatalf("sshd started despite the refusal; logs:\n%s", logs)
+			}
+		})
+	}
 }

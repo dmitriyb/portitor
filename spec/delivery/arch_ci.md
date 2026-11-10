@@ -34,19 +34,59 @@ The remap step is `scripts/ci-userns-remap.sh`, which merges the setting into th
 - **Docker tier** — a job in `ci.yml`: `PORTITOR_REQUIRE_USERNS=1 go test -tags docker -run
   DockerTier -timeout 40m ./cmd/portitor/`. No secrets. Its scenarios are in `test_deploy.md`.
 - **Acceptance tier** — `.github/workflows/acceptance.yml`: `go test -tags acceptance -run
-  GateAccept -timeout 50m ./cmd/portitor/` against one disposable GitHub repo. It is skipped for
-  pull requests from forks and from Dependabot, which get no secrets. The Actions-proxy scenario
-  does not run here (see `test_deploy.md`). The step gets `PORTITOR_ACCEPT_PAT` (a repository secret)
-  and `PORTITOR_ACCEPT_REPO` (a repository variable) in its env and nothing else does. The PAT is
-  fine-grained, limited to Contents and Pull requests on that one private repo, with Actions
-  disabled there, so a leak reaches only a repo every scenario resets anyway. The workflow's
-  concurrency group is the single global `acceptance` with `cancel-in-progress: false`: every run
-  resets the same repo, so two runs must never overlap and a cancelled run would leave its PRs
-  and branches behind.
+  GateAccept -timeout 50m ./cmd/portitor/`, described below.
 
-The acceptance tier assumes people push portitor's branches. Once agents push them, a policy
-that denies them any change under `.github/**` (as spexmachina's gate policy does) must be in
-place first; otherwise an agent-written workflow could reach other repository secrets.
+## The acceptance tier
+
+The acceptance tier proves the gate against real GitHub: a gate deployed from the working tree
+through the same builder `portitor deploy` uses, driven over SSH as each role, its effects read
+back from GitHub. Its scenarios are listed in `test_deploy.md`; this section is the machinery
+around them.
+
+**One disposable repo.** Every scenario runs against one private GitHub repo that exists for
+nothing else (`PORTITOR_ACCEPT_REPO`, a repository variable). Actions are enabled there, limited
+to the owner's own actions and reusable workflows; the only workflow is the seed's.
+
+**The seed is data in this repo.** The repo's pristine state is the tree under
+`cmd/portitor/testdata/acceptance-seed` — a probe file, the approvals fixture, and the
+pass+fail workflow the Actions-proxy scenario runs, triggered only on that scenario's branch so
+no other scenario's PR carries checks — at the tag `cmd/portitor/testdata/acceptance-seed.tag`
+names. Changing the seed means changing that tree and the tag name together.
+
+**The operator prepares the seed; the suite never does.** The seed holds a workflow file, and
+writing one needs the Workflows permission, which the suite's credential deliberately lacks. So
+the seed is written with the repo owner's own credential: `scripts/prepare-acceptance-seed.sh
+<clone>` makes, in a clone of the disposable repo, a parentless `main` commit whose tree is
+exactly the seed, and the tag; the operator pushes both (`--force` for `main`) and deletes
+superseded seed tags. It runs by hand, once per seed change, never in CI.
+
+**Every scenario starts from the seed.** Before each scenario the suite verifies the tag exists
+and its tree equals the seed tree path for path and byte for byte — a missing or stale seed
+fails, naming the fix — then resets the repo to it: closes open pull requests, deletes every
+branch but the default, and force-moves the default branch to the tag.
+
+**One credential, bounded by what GitHub refuses.** `PORTITOR_ACCEPT_PAT` (a repository secret)
+is a fine-grained PAT on the disposable repo only, with Contents, Pull requests and Actions
+(read/write) and no Workflows permission. Contents and Pull requests are what the gate's own
+credential needs to forward branches, open, review and merge pull requests; Actions is what the
+Actions proxy needs to read runs and re-run jobs. A leaked PAT can therefore push to a repo
+every scenario resets, and re-run the seed's own workflow — never add a workflow that runs code
+of its choosing. `TestGateAccept_PATCannotWriteWorkflows` pushes a new workflow with it and fails
+the moment GitHub accepts it, so that bound is checked on every run instead of assumed.
+
+**Where the credential goes.** Only the acceptance step's env holds the PAT; the harness
+hands it to the gate as the copied-in credential file and keeps it out of every docker child's
+env. The job is skipped for pull requests from forks and from Dependabot, which get no secrets;
+under CI a missing secret or variable fails the suite rather than skipping it.
+
+**Runs never overlap.** The workflow's concurrency group is the single global `acceptance`
+with `cancel-in-progress: false`: every run resets the same repo, so two runs must never
+interleave, and a cancelled run would leave its pull requests and branches behind.
+
+**The trust assumption.** The acceptance tier runs the code of the branch under test with the
+PAT in reach. It assumes people push portitor's branches. Once agents push them, a policy that
+denies them any change under `.github/**` (as spexmachina's gate policy does) must be in place
+first; otherwise an agent-written workflow could reach other repository secrets.
 
 ## Nightly fuzz (`schedule`)
 
